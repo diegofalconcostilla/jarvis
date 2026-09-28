@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: setup/02_install_ollama.sh fills __HOME__ and __OLLAMA__ and copies it to ~/Library/LaunchAgents.
+     Use instead of `brew services start ollama` so these memory settings survive reboots. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jarvis.ollama</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__OLLAMA__</string>
+        <string>serve</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- One model at a time: two ~19 GB models would not fit in 32 GB and would push macOS into SSD swap. -->
+        <key>OLLAMA_MAX_LOADED_MODELS</key>
+        <string>1</string>
+        <!-- One request at a time: parallel requests multiply the context memory. -->
+        <key>OLLAMA_NUM_PARALLEL</key>
+        <string>1</string>
+        <!-- Unload after 5 idle minutes so memory and GPU rest between jobs. -->
+        <key>OLLAMA_KEEP_ALIVE</key>
+        <string>5m</string>
+        <!-- Flash attention + 8-bit KV cache: roughly halves context memory at no real quality cost. -->
+        <key>OLLAMA_FLASH_ATTENTION</key>
+        <string>1</string>
+        <key>OLLAMA_KV_CACHE_TYPE</key>
+        <string>q8_0</string>
+        <!-- Local only: nothing else on the network can use or probe the models. -->
+        <key>OLLAMA_HOST</key>
+        <string>127.0.0.1:11434</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/jarvis-ollama.out</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/jarvis-ollama.err</string>
+</dict>
+</plist>

@@ -1,0 +1,14 @@
+# secrets and private state - never commit
+.env
+.env.*
+!.env.example
+*.pem
+id_rsa*
+id_ed25519*
+consent.json
+# local state / caches
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+logs/
