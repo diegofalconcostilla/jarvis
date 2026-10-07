@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Agenda scan: once a day at 03:00 (new email + calendar, read-only, processed locally). It
+     yields to the incubator (waits up to 45 min if a job is running, else skips the day). -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.jarvis.agenda-scan</string>
+    <key>ProgramArguments</key>
+    <array><string>/usr/bin/python3</string><string>-m</string><string>jarvis.google</string></array>
+    <key>WorkingDirectory</key><string>__REPO__</string>
+    <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+    <key>StandardOutPath</key><string>__HOME__/Library/Logs/jarvis-agenda-scan.log</string>
+    <key>StandardErrorPath</key><string>__HOME__/Library/Logs/jarvis-agenda-scan.log</string>
+</dict>
+</plist>

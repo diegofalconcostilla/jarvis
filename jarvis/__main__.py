@@ -4,6 +4,9 @@
   ask "question"          answer with the local model (JARVIS_MODEL); --claude lets Claude answer when within budget
   consent list|grant X|revoke X
   scan FILE...            look for secrets (the pre-commit hook runs this)
+  google-login            at the Mac: approve read-only Gmail + Calendar access (opens the browser)
+  agenda [days]           show the stored activities for the next N days (default 14)
+  agenda-scan             scan new email + calendar now (scheduled daily 03:00; needs consent: email / calendar)
 """
 
 from __future__ import annotations
@@ -68,6 +71,10 @@ def main():
     k.add_argument("action", choices=["list", "grant", "revoke"])
     k.add_argument("scope", nargs="?")
     k.add_argument("--note", default="")
+    sub.add_parser("google-login")
+    ag = sub.add_parser("agenda")
+    ag.add_argument("days", nargs="?", type=int, default=730)
+    sub.add_parser("agenda-scan")
     s = sub.add_parser("scan")
     s.add_argument("files", nargs="+")
     args = p.parse_args()
@@ -90,6 +97,17 @@ def main():
             consent.grant(args.scope, args.note)
         else:
             consent.revoke(args.scope)
+    elif args.cmd == "google-login":
+        from . import google
+        google.login()
+    elif args.cmd == "agenda":
+        from datetime import date, timedelta
+        from . import agenda
+        items = agenda.between(date.today(), date.today() + timedelta(args.days))
+        print("\n".join(agenda.fmt(i) for i in items) or "No activities in that range.")
+    elif args.cmd == "agenda-scan":
+        from . import google
+        google.run()
     elif args.cmd == "scan":
         bad = 0
         for f in args.files:

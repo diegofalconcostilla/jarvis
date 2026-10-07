@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Daily push at 20:00: commit + push every listed repo after a sensitive-data scan (jarvis/daily_push.py). -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.jarvis.daily-push</string>
+    <key>ProgramArguments</key>
+    <array><string>/usr/bin/python3</string><string>-m</string><string>jarvis.daily_push</string></array>
+    <key>WorkingDirectory</key><string>__REPO__</string>
+    <key>StartCalendarInterval</key><dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>0</integer></dict>
+    <key>StandardOutPath</key><string>__HOME__/Library/Logs/jarvis-daily-push.log</string>
+    <key>StandardErrorPath</key><string>__HOME__/Library/Logs/jarvis-daily-push.log</string>
+</dict>
+</plist>
