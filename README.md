@@ -56,13 +56,32 @@ Model sizing on 32 GB: stay around 30B parameters at Q4 or smaller (~20 GB). A m
   Tune with `JARVIS_FIVE_HOUR_MAX` / `JARVIS_SEVEN_DAY_MAX`.
 - **Send diffs and summaries, not whole files**, and cache anything reused (plans, reviews).
 
+## Job applications
+
+Private files in `~/.jarvis/jobs/` (never in git). Consent: `python3 -m jarvis consent grant jobs` (Gmail tracking
+also uses `email`).
+
+```
+python3 -m jarvis jobs init          # creates config.json (companies + board/slug, roles, locations) and resume/
+python3 -m jarvis jobs boards        # checks each company's public board (greenhouse, lever, ashby, smartrecruiters)
+python3 -m jarvis jobs search        # new matching postings, scored locally against the master resume
+python3 -m jarvis jobs docs KEY      # resume.docx + cover_letter.docx for one posting (check.txt lists removed lines)
+python3 -m jarvis jobs track --months 6   # one-time: past application emails; then daily
+python3 -m jarvis jobs list
+```
+Daily at 04:00 (`setup/jobs.plist.template`): search, documents for the best few, tracking, one Telegram summary.
+Jarvis never applies for you.
+
 ## Layout
 
 ```
 jarvis/guard.py     API-key detection, secret scanning
 jarvis/consent.py   consent registry (~/.jarvis/consent.json, never in git)
 jarvis/llm.py       ollama() / claude() / ask(), usage-window budget
-jarvis/__main__.py  CLI: check, ask, consent, scan
+jarvis/__main__.py  CLI: check, ask, consent, scan, agenda, jobs
+jarvis/google.py    read-only Gmail + Calendar reader (agenda), processed locally
+jarvis/jobs.py      job applications: public job boards -> local fit score -> tailored resume + cover letter
+                    (nothing invented: unsupported employers/skills/numbers are dropped) -> Gmail status tracking
 setup/              consent-gated install scripts, Ollama launchd template, pre-commit hook
 tests/              proof the guardrails work
 CLAUDE.md           rules any Claude session working here must follow

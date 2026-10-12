@@ -14,16 +14,17 @@ handles data from Google services.
 With the owner's explicit consent, Jarvis requests these Google permissions, both **read-only**:
 
 - `https://www.googleapis.com/auth/gmail.readonly`: to read **new** email messages and find dated activities
-  (appointments, reservations, travel, deadlines). Promotional and social email is skipped.
+  (appointments, reservations, travel, deadlines) and to follow the status of the owner's own job applications
+  (confirmations, interview invitations, decisions). Promotional and social email is skipped.
 - `https://www.googleapis.com/auth/calendar.readonly`: to read upcoming calendar events.
 
 Jarvis **cannot** send, delete, modify or label email, and cannot create or change calendar events.
 
 ## How the data is used
 
-- Messages are processed **locally on the owner's computer** by a local AI model, only to extract activity details:
-  title, date, time and place.
-- Only those extracted details are stored, in a private file on the owner's computer. Full email content is not
+- Messages are processed **locally on the owner's computer** by a local AI model, only to extract activity details
+  (title, date, time and place) or job-application details (company, role, status, next step).
+- Only those extracted details are stored, in private files on the owner's computer. Full email content is not
   stored.
 - The owner receives short reminders containing only an activity's title, time and place, delivered through the
   owner's own messaging bot.

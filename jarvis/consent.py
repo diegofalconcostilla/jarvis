@@ -18,7 +18,7 @@ STORE = Path.home() / ".jarvis" / "consent.json"
 
 # Scopes that always need explicit consent. Code must call require() before touching any of them.
 PRIVATE_SCOPES = ["email", "calendar", "contacts", "messages", "browser-history", "photos", "location",
-                  "keychain", "files", "microphone", "camera", "payments"]
+                  "keychain", "files", "microphone", "camera", "payments", "jobs"]
 
 
 class ConsentRequired(PermissionError):
