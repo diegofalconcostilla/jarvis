@@ -7,7 +7,7 @@
   google-login            at the Mac: approve read-only Gmail + Calendar access (opens the browser)
   agenda [days]           show the stored activities for the next N days (default 14)
   agenda-scan             scan new email + calendar now (scheduled daily 03:00; needs consent: email / calendar)
-  jobs init|boards|search|docs KEY|track [--months N]|list|run
+  jobs init|boards|search|docs KEY|track [--months N]|list|report|run
                           job applications (needs consent: jobs; tracking also email). init = create
                           ~/.jarvis/jobs/config.json; boards = verify company boards; docs = resume + cover letter
 """
@@ -79,7 +79,7 @@ def main():
     ag.add_argument("days", nargs="?", type=int, default=730)
     sub.add_parser("agenda-scan")
     j = sub.add_parser("jobs")
-    j.add_argument("action", choices=["init", "boards", "search", "docs", "track", "list", "run"])
+    j.add_argument("action", choices=["init", "boards", "search", "docs", "track", "list", "report", "run"])
     j.add_argument("key", nargs="?")
     j.add_argument("--months", type=int)
     s = sub.add_parser("scan")
@@ -130,12 +130,15 @@ def main():
         elif args.action == "docs":
             if not args.key:
                 sys.exit("give a posting key (python3 -m jarvis jobs list)")
-            folder, dropped = jobs.prepare(args.key)
-            print(f"{folder}\n{len(dropped)} unsupported line(s) removed (see check.txt)")
+            folder, dropped, added = jobs.prepare(args.key)
+            print(f"{folder}\nadded from the posting: {', '.join(added) or 'nothing'}\n"
+                  f"{len(dropped)} unsupported line(s) removed (see check.txt)")
         elif args.action == "track":
             print("\n".join(jobs.track(months=args.months, max_opened=400 if args.months else 40)) or "no changes")
         elif args.action == "list":
             print(jobs.listing())
+        elif args.action == "report":
+            print(jobs.report())
         else:
             jobs.run()
     elif args.cmd == "scan":

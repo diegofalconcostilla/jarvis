@@ -69,7 +69,7 @@ python3 -m jarvis jobs docs KEY      # resume.docx + cover_letter.docx for one p
 python3 -m jarvis jobs track --months 6   # one-time: past application emails; then daily
 python3 -m jarvis jobs list
 ```
-Daily at 04:00 (`setup/jobs.plist.template`): search, documents for the best few, tracking, one Telegram summary.
+Daily at 05:00 (`setup/jobs.plist.template`): Gmail tracking + search. Mondays: resume + cover letter for every new strong match, then one weekly Telegram summary with Applications.html/.docx. Other days Telegram only for interview requests or recruiter updates (never rejections).
 Jarvis never applies for you.
 
 ## Layout

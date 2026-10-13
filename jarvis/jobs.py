@@ -47,12 +47,19 @@ DEFAULT_CONFIG = {
     "exclude": ["intern", "internship"],     # titles with any of these are skipped
     "locations": ["Seattle"],                # names from LOCATIONS below (or any text); empty list = anywhere
     "search_terms": ["software engineer"],   # queries for search-API boards (amazon, microsoft)
+    "experience": [2, 5],                    # your years of experience: skip postings asking for more/less
     "require_sponsorship": True,             # only postings with evidence the employer sponsors work visas
     "no_visa_needed": [],                    # countries (US, UK, CA, MX) where you need no sponsorship
-    "min_fit": 7,                            # 0-10 local-model fit score needed to prepare documents
-    "docs_per_day": 3,
+    "min_fit": 4,                            # 0-10 (deep) checklist fit needed to prepare documents
+    "quick_fit_min": 2,                      # quick score needed for the deep re-score
+    "deep_scores_per_day": 60,               # larger-model re-scores per day (~40-60 s each)
+    "docs_per_week": 40,                     # Mondays: documents for the week's best-ranked matches
+    "stop_by": "07:45",                      # large-model work stops here (the incubator starts at 08:00);
+                                             # what's left continues the next morning
     "search_daily": True,
     "send_documents": False,                 # also send the .docx files to Telegram (your own bot)
+    "add_posting_skills": True,              # owner's permission: list the posting's skills/technologies too
+    "max_added_skills": 6,                   # ... at most this many per resume, AI-related first
 }
 
 # Location name -> (country, lowercase patterns found in postings' location text)
@@ -225,21 +232,75 @@ def where(job: dict, conf: dict) -> list[str]:
 def matches(job: dict, conf: dict) -> bool:
     words = lambda s: re.findall(r"[a-z0-9+#]+", s.lower())  # noqa: E731
     tw = set(words(job["title"]))
-    if any(set(words(x)) <= tw for x in conf["exclude"] if words(x)):
+    title = f" {' '.join(words(job['title']))} "
+    if any(f" {' '.join(words(x))} " in title for x in conf["exclude"] if words(x)):  # exclude = whole phrases
         return False
     if not any(set(words(r)) <= tw for r in conf["roles"] if words(r)):
         return False
     return not conf["locations"] or bool(where(job, conf))
 
 
+# --- experience level ------------------------------------------------------------------
+
+NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+             "ten": 10, "twelve": 12, "fifteen": 15}
+YEARS = re.compile(r"(\d{1,2}|" + "|".join(NUM_WORDS) + r")\s*(?:\+|plus)?\s*(?:(?:-|–|to)\s*(\d{1,2}|"
+                   + "|".join(NUM_WORDS) + r")\s*)?\+?\s*(?:\(\w+\)\s*)?years?", re.I)
+
+
+def years_required(text: str) -> tuple[int, int] | None:
+    """(min, max) years of experience a posting asks for, from phrases like '3+ years ... experience' or '2-5 years
+    of experience'. The most permissive minimum wins ('5+ years, or 3+ with a PhD' -> 3). None if not stated."""
+    lows, highs = [], []
+    for m in YEARS.finditer(text):
+        context = text[m.end():m.end() + 80].lower()
+        if "experience" not in context and "industry" not in context and "professional" not in context:
+            continue
+        lo = int(NUM_WORDS.get(m.group(1).lower(), m.group(1)))
+        hi = m.group(2) and int(NUM_WORDS.get(m.group(2).lower(), m.group(2)))
+        if lo > 20:
+            continue
+        lows.append(lo)
+        if hi:
+            highs.append(hi)
+    if not lows:
+        return None
+    return min(lows), max(highs) if highs else 99
+
+
+SENIOR_TITLES = re.compile(r"\b(staff|principal|distinguished|director|head of|vp|vice president|architect|"
+                           r"fellow|lead|manager|senior manager|sr\.? manager)\b", re.I)
+JUNIOR_TITLES = re.compile(r"\b(new grad|new graduate|graduate|university|entry[- ]level|early career|apprentice|"
+                           r"junior)\b", re.I)
+
+
+def level_ok(job: dict, conf: dict) -> tuple[bool, str]:
+    """Fits someone with conf['experience'] years: title level first, then the years the posting asks for."""
+    lo, hi = conf.get("experience") or [0, 99]
+    if SENIOR_TITLES.search(job["title"]):
+        return False, "title above your level"
+    if lo >= 2 and JUNIOR_TITLES.search(job["title"]):
+        return False, "entry-level title"
+    req = years_required(job["text"])
+    if req and req[0] > hi:
+        return False, f"asks for {req[0]}+ years"
+    if req and req[1] < lo:
+        return False, f"asks for at most {req[1]} years"
+    return True, f"{req[0]}+ yrs" if req else "years not stated"
+
+
 # --- work-visa sponsorship -------------------------------------------------------------
-# Evidence, strongest first: what the posting says; then official public data on the employer:
-#   US: USCIS H-1B Employer Data Hub (approvals per employer), UK: Home Office register of licensed sponsors.
-# Canada / Mexico have no public sponsor list: only the posting's own words (or a company's "sponsors_in").
+# Evidence, strongest first: what the posting says; then public data on the employer:
+#   US: H-1B Labor Condition Applications filed this/last year (DOL disclosure data, searched through h1bdata.info,
+#       which allows automated access) + USCIS H-1B Employer Data Hub approvals (FY2023, partial);
+#   UK: Home Office register of licensed sponsors (Skilled Worker route);
+#   Canada: employers issued a positive LMIA in the last 4 quarters (incl. Global Talent Stream; open.canada.ca).
+# Mexico: only the posting's words (or no_visa_needed).
 
 SPONSORS = HOME / "sponsors"
 H1B_URL = "https://www.uscis.gov/sites/default/files/document/data/h1b_datahubexport-2023.csv"
 UK_PAGE = "https://www.gov.uk/government/publications/register-of-licensed-sponsors-workers"
+LMIA_API = "https://open.canada.ca/data/api/action/package_show?id=90fed587-1364-4f33-a9ee-208181dc0b97"
 NO_SPONSOR = re.compile(
     r"(not (be )?(able|in a position) to (offer |provide )?(visa |immigration )?sponsor|unable to (offer |provide )?"
     r"(visa |immigration )?sponsor|(do|does|will|can|are) not (currently )?(offer |provide )?(visa |immigration )?"
@@ -262,7 +323,11 @@ def _cname(s: str) -> str:
 def _download(url: str, dest: Path):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (jarvis-jobs)"})
     with urllib.request.urlopen(req, timeout=180) as r:
-        dest.write_bytes(r.read())
+        data = r.read()
+    m = re.search(rb'Redirecting.*?href="([^"]+)"', data[:2000], re.S)
+    if m:  # open.canada.ca answers with an HTML redirect page to the file's storage URL
+        return _download(htmllib.unescape(m.group(1).decode()), dest)
+    dest.write_bytes(data)
 
 
 def refresh_sponsor_data(max_age_days: int = 30):
@@ -277,18 +342,54 @@ def refresh_sponsor_data(max_age_days: int = 30):
         m = re.search(r"https://assets\.publishing\.service\.gov\.uk/[^\"]+\.csv", page)
         if m:
             _download(m.group(0), SPONSORS / "uk_register.csv")
+    if old(SPONSORS / "ca_lmia.json"):
+        res = _json(LMIA_API)["result"]["resources"]
+        files = sorted((r for r in res if r["url"].endswith("_pos_en.xlsx")), key=lambda r: r.get("created", ""))[-4:]
+        names = set()
+        for r in files:
+            url = r["url"] if r["url"].startswith("http") else "https://open.canada.ca" + r["url"]
+            _download(url, SPONSORS / "lmia.xlsx")
+            names |= _xlsx_column(SPONSORS / "lmia.xlsx", "employer")
+        (SPONSORS / "lmia.xlsx").unlink(missing_ok=True)
+        _write_private(SPONSORS / "ca_lmia.json", sorted(names))
+
+
+def _xlsx_column(path: Path, header: str) -> set:
+    """Values of the first column whose header contains `header` (stdlib-only xlsx reading)."""
+    import zipfile
+    from xml.etree import ElementTree as ET
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    z = zipfile.ZipFile(path)
+    shared = [("".join(t.text or "" for t in si.iter(f"{{{ns['m']}}}t")))
+              for si in ET.fromstring(z.read("xl/sharedStrings.xml")).findall("m:si", ns)] \
+        if "xl/sharedStrings.xml" in z.namelist() else []
+    col, out = None, set()
+    for row in ET.fromstring(z.read("xl/worksheets/sheet1.xml")).iter(f"{{{ns['m']}}}row"):
+        vals = {}
+        for c in row.findall("m:c", ns):
+            v = c.find("m:v", ns)
+            txt = c.find(".//m:t", ns)
+            val = shared[int(v.text)] if c.get("t") == "s" and v is not None else (v.text if v is not None else (txt.text if txt is not None else ""))
+            vals[re.sub(r"\d", "", c.get("r", ""))] = val or ""
+        if col is None:
+            col = next((k for k, v in vals.items() if v.strip().lower().startswith(header) and len(v) < 40), None)
+        elif vals.get(col):
+            out.add(vals[col].strip())
+    return out
 
 
 _H1B: dict | None = None
 _UK: set | None = None
+_CA: set | None = None
 
 
-def _sponsor_lists() -> tuple[dict, set]:
-    global _H1B, _UK
+def _sponsor_lists() -> tuple[dict, set, set]:
+    global _H1B, _UK, _CA
     if _H1B is None:
         import csv
         refresh_sponsor_data()
         _H1B, _UK = {}, set()
+        _CA = {_cname(n) for n in json.loads((SPONSORS / "ca_lmia.json").read_text())}
         with open(SPONSORS / "h1b.csv", newline="", encoding="utf-8", errors="replace") as f:
             for r in csv.DictReader(f):
                 n = _cname(r.get("Employer") or "")
@@ -299,13 +400,47 @@ def _sponsor_lists() -> tuple[dict, set]:
         with open(SPONSORS / "uk_register.csv", newline="", encoding="utf-8", errors="replace") as f:
             for r in csv.DictReader(f):
                 if "skilled worker" in (r.get("Route") or "").lower():
-                    _UK.add(_cname(r.get("Organisation Name") or ""))
-    return _H1B, _UK
+                    for part in re.split(r"\bt/a\b", r.get("Organisation Name") or "", flags=re.I):
+                        _UK.add(_cname(part))  # "Roofoods Ltd t/a Deliveroo": both names
+    return _H1B, _UK, _CA
+
+
+GENERIC = {"technologies", "technology", "labs", "lab", "holdings", "global", "opco", "group", "international",
+           "ai", "hq", "america", "north", "canada", "mexico", "uk", "usa",
+           "services", "software", "development", "payments", "web", "europe", "emea", "systems", "cloud", "data",
+           "operations", "ulc", "corp", "incorporated"}
+
+
+def _same_employer(n: str, w: str) -> bool:
+    """'openai opco' is OpenAI; 'crusoe inns' is not Crusoe (only generic words may follow the name)."""
+    return bool(w) and (n == w or (n.startswith(w + " ") and set(n[len(w):].split()) <= GENERIC))
 
 
 def _employer_hits(company: dict, names) -> list[str]:
     wanted = [_cname(n) for n in company.get("legal_names") or [company["name"]]]
-    return [n for n in names if any(n == w or n.startswith(w + " ") for w in wanted if w)]
+    return [n for n in names if any(_same_employer(n, w) for w in wanted)]
+
+
+def lca_filings(company: dict) -> int:
+    """H-1B LCAs the employer filed this year + last year (cached 30 days per company)."""
+    cache_f = SPONSORS / "lca_cache.json"
+    cache = json.loads(cache_f.read_text()) if cache_f.exists() else {}
+    hit = cache.get(company["name"])
+    if hit and time.time() - hit["at"] < 30 * 86400:
+        return hit["n"]
+    wanted = [_cname(n) for n in company.get("legal_names") or [company["name"]]]
+    n = 0
+    for name in company.get("legal_names") or [company["name"]]:
+        for year in (date.today().year, date.today().year - 1):
+            q = urllib.parse.urlencode({"em": name, "job": "", "city": "", "year": year})
+            req = urllib.request.Request(f"https://h1bdata.info/index.php?{q}", headers={"User-Agent": "Mozilla/5.0"})
+            page = urllib.request.urlopen(req, timeout=60).read().decode(errors="replace")
+            employers = re.findall(r"<tr><td><a [^>]*>([^<]*)</a>", page)
+            n += sum(any(_same_employer(_cname(htmllib.unescape(e)), w) for w in wanted) for e in employers)
+            time.sleep(1)  # be polite
+    cache[company["name"]] = {"n": n, "at": time.time()}
+    _write_private(cache_f, cache)
+    return n
 
 
 def sponsorship(job: dict, company: dict, country: str) -> tuple[str, str]:
@@ -317,13 +452,18 @@ def sponsorship(job: dict, company: dict, country: str) -> tuple[str, str]:
         return "yes", f"posting: “{m.group(0)}”"
     if country in company.get("sponsors_in", []):
         return "yes", company.get("sponsor_note", "company sponsors here (config)")
-    h1b, uk = _sponsor_lists()
+    h1b, uk, ca = _sponsor_lists()
     if country == "US":
+        n = lca_filings(company)
+        if n >= 3:
+            return "yes", f"{n} H-1B filings in {date.today().year - 1}-{date.today().year} (DOL data)"
         n = sum(h1b[k] for k in _employer_hits(company, h1b))
         if n >= 3:
             return "yes", f"{n} H-1B approvals (USCIS FY2023)"
     if country == "UK" and _employer_hits(company, uk):
         return "yes", "UK licensed visa sponsor (Home Office register)"
+    if country == "CA" and _employer_hits(company, ca):
+        return "yes", "approved to hire foreign workers in Canada (positive LMIA, last 4 quarters)"
     return "unknown", ""
 
 
@@ -379,10 +519,10 @@ def resume_text() -> str:
 
 # --- local model helpers ---------------------------------------------------------------
 
-def _ask_json(prompt: str, model: str, num_ctx: int = 12288) -> dict:
-    if model.startswith("qwen3"):
-        prompt = "/no_think\n" + prompt
-    raw = llm.ollama(prompt, model, temperature=0.2, num_ctx=num_ctx, json_mode=True)
+def _ask_json(prompt: str, model: str, num_ctx: int = 12288, think: bool = False) -> dict:
+    """JSON from a local model; reasoning models think first only when asked (slower, better)."""
+    raw = llm.ollama(prompt, model, temperature=0.2, num_ctx=num_ctx, json_mode=True,
+                     think=think if model.startswith(("qwen3", "gpt-oss")) else None)
     raw = re.sub(r"(?s)<think>.*?</think>", "", raw).strip()
     try:
         d = json.loads(raw)
@@ -399,10 +539,13 @@ def _unload(*models):
             pass
 
 
-FIT_PROMPT = """You compare a candidate's resume with a job posting. Be strict and honest.
-Answer with ONLY this JSON: {{"fit": 0-10, "why": "one short sentence", "missing": ["up to 3 key requirements the
-resume does not show"]}}
-10 = meets every key requirement; 7 = meets most, a credible application; 4 = a stretch; 0 = unrelated.
+FIT_PROMPT = """You screen a candidate for ONE job. Be strict: count only what the RESUME actually shows.
+1. List the job's 6 most important REQUIRED qualifications (not nice-to-haves).
+2. For each, answer "yes" (the resume clearly shows it), "partial" (related experience) or "no".
+3. Is the job's main domain/stack the same as the candidate's (e.g. frontend vs backend vs infra vs ML research)?
+Answer with ONLY this JSON:
+{{"requirements": [{{"req": "", "met": "yes|partial|no"}}], "same_domain": "yes|partial|no",
+ "why": "one short sentence"}}
 
 RESUME:
 {resume}
@@ -411,29 +554,35 @@ JOB: {title} at {company} ({location})
 {posting}"""
 
 
-def score(job: dict, resume: str) -> dict:
-    d = _ask_json(FIT_PROMPT.format(resume=resume[:6000], title=job["title"], company=job["company"],
-                                    location=job["location"], posting=job["text"][:5000]), SCORE_MODEL)
-    try:
-        fit = max(0, min(10, int(d.get("fit", 0))))
-    except (TypeError, ValueError):
-        fit = 0
-    return {"fit": fit, "why": str(d.get("why", ""))[:200],
-            "missing": [str(m)[:80] for m in d.get("missing", []) if m][:3]}
+def score(job: dict, resume: str, deep: bool = False) -> dict:
+    """0-10 from a requirement checklist (yes = 1, partial = 0.5, weighted by domain match): the local model judges
+    each requirement, the code does the math, so scores are comparable across postings. deep = the larger model,
+    thinking first (slow, more accurate): used to re-check the promising ones."""
+    d = _ask_json(FIT_PROMPT.format(resume=resume[:8000], title=job["title"], company=job["company"],
+                                    location=job["location"], posting=job["text"][:7000]),
+                  WRITE_MODEL if deep else SCORE_MODEL, num_ctx=16384 if deep else 12288, think=deep)
+    reqs = [r for r in d.get("requirements", []) if isinstance(r, dict) and r.get("req")][:6]
+    met = lambda r: {"yes": 1, "partial": 0.5}.get(str(r.get("met", "")).lower(), 0)  # noqa: E731
+    domain = {"yes": 1, "partial": 0.6}.get(str(d.get("same_domain", "")).lower(), 0.2)
+    fit = round(10 * sum(map(met, reqs)) / len(reqs) * (0.5 + 0.5 * domain)) if reqs else 0
+    return {"fit": fit, "why": str(d.get("why", ""))[:200], "scored_by": "deep" if deep else "quick",
+            "missing": [str(r["req"])[:80] for r in reqs if met(r) == 0][:3]}
 
 
 # --- tailored documents ------------------------------------------------------------------
 
-RESUME_PROMPT = """Tailor a resume to one job. STRICT RULES:
-- Use ONLY facts in the MASTER RESUME. Never invent or inflate employers, titles, dates, degrees, skills, tools,
-  numbers, metrics or achievements. Never copy a requirement from the job into the resume unless the master resume
-  already shows it.
+RESUME_PROMPT = """Tailor a resume to one job. RULES:
+- Experience, employers, titles, dates, degrees, numbers, metrics and achievements come ONLY from the MASTER RESUME.
+  Never invent or inflate them, and never put a job requirement into an experience bullet the resume doesn't support.
+- SKILLS: list the master resume's relevant skills{posting_skills_rule}
 - You may: choose and reorder the most relevant experience and bullets, rephrase bullets to mirror the job's wording
-  (same facts), and write a 2-3 sentence summary built only from the master resume.
+  (same facts), and write a 2-3 sentence summary from the master resume{summary_rule}.
 - Keep company names, titles and dates exactly as written in the master resume.
+- It MUST fit on ONE page: about 450 words at most; 3-5 bullets for the most relevant role, 2-3 for others;
+  at most 16 skills; summary 2-3 short sentences.
 Answer with ONLY this JSON:
 {{"name": "", "contact": ["email/phone/city/links exactly as in the master resume"], "summary": "",
- "skills": ["skills from the master resume, most relevant first"],
+ "skills": ["most relevant first"],
  "experience": [{{"company": "", "title": "", "dates": "", "location": "", "bullets": [""]}}],
  "education": [{{"school": "", "degree": "", "dates": ""}}],
  "other": [{{"heading": "e.g. Certifications / Projects", "items": [""]}}]}}
@@ -444,9 +593,9 @@ MASTER RESUME:
 JOB: {title} at {company} ({location})
 {posting}"""
 
-LETTER_PROMPT = """Write a cover letter for this job. STRICT RULES:
-- Every claim about the candidate must come from the MASTER RESUME. Never invent experience, skills, numbers,
-  years of experience, or reasons you can't support. Don't claim to know people at the company.
+LETTER_PROMPT = """Write a cover letter for this job. RULES:
+- Experience, achievements, employers, numbers and years of experience come ONLY from the MASTER RESUME. Never
+  invent projects or results. Don't claim to know people at the company.{letter_rule}
 - 3-4 short paragraphs, under 300 words, confident and specific, no clichés. Mention the role and company.
 - No address block, no date, no signature line (they are added separately).
 Answer with ONLY this JSON: {{"greeting": "Dear Hiring Team,", "paragraphs": [""], "closing": "Sincerely,"}}
@@ -456,6 +605,45 @@ MASTER RESUME:
 
 JOB: {title} at {company} ({location})
 {posting}"""
+
+REVIEW_RESUME = """You are a senior tech recruiter reviewing a tailored resume DRAFT for ONE job. Improve it, then
+return the full improved resume in the same JSON shape as the draft.
+Check and fix:
+- Relevance: the most job-relevant experience and bullets first; drop weak or off-topic bullets.
+- Keywords: the job's key skills/technologies appear naturally (ATS), named as in the posting{posting_skills_rule}
+- Bullets: start with a strong verb, show scope and impact, one line or two, no filler, no first person.
+- Summary: 2-3 sentences aimed at THIS role, specific, no clichés.
+- Truth: experience, employers, titles, dates, numbers and achievements must match the MASTER RESUME exactly;
+  remove anything the master resume doesn't support. Never move a job requirement into an experience bullet.
+- Grammar, consistency (tense, punctuation), no duplicates.
+- Length: it MUST fit on ONE page (about 450 words at most, at most 16 skills); cut the least relevant first.
+
+MASTER RESUME:
+{resume}
+
+JOB: {title} at {company} ({location})
+{posting}
+
+DRAFT (JSON):
+{draft}"""
+
+REVIEW_LETTER = """You are a senior tech recruiter reviewing a cover letter DRAFT for ONE job. Improve it and return
+the same JSON shape: {{"greeting": "", "paragraphs": [""], "closing": ""}}
+Check and fix:
+- Opening: names the role and company and a specific reason this candidate fits (from the master resume).
+- Middle: 1-2 concrete examples from the MASTER RESUME mapped to the job's top needs; why this company.
+- Tone: confident, specific, warm; no clichés ("I am writing to express"), no repetition, under 300 words.
+- Truth: experience, results, numbers and years only from the MASTER RESUME; skills the job asks for may be named
+  as skills, never with invented projects or results.{letter_rule}
+
+MASTER RESUME:
+{resume}
+
+JOB: {title} at {company} ({location})
+{posting}
+
+DRAFT (JSON):
+{draft}"""
 
 NUMBER = re.compile(r"\d[\d,.]*\+?%?")
 
@@ -474,63 +662,157 @@ def _in_resume(s: str, resume_n: str) -> bool:
     return bool(_norm(s)) and _norm(s) in resume_n
 
 
-def verify_resume(d: dict, resume: str) -> tuple[dict, list[str]]:
-    """Drop anything the master resume doesn't support. Returns (clean resume, what was dropped)."""
-    rn, dropped = _norm(resume), []
+POSTING_SKILLS_RULE = (", PLUS the skills, tools and technologies the JOB posting asks for (especially AI: LLMs, "
+                       "agents, RAG, prompt engineering, model APIs, ML frameworks), named exactly as in the posting.")
+SUMMARY_RULE = "; it may name skills from the job posting (as skills, never as past results)"
+LETTER_RULE = ("\n- You may say the candidate is skilled in / works with technologies the JOB asks for, without "
+               "inventing where or how they were used.")
+
+
+def verify_resume(d: dict, resume: str, posting: str = "") -> tuple[dict, list[str], list[str]]:
+    """Drop anything the master resume doesn't support; skills may also come from the posting (owner's choice,
+    add_posting_skills) and are reported separately. Returns (clean resume, dropped, skills added from the posting)."""
+    rn, pn, dropped = _norm(resume), _norm(posting), []
     clean = {"name": d.get("name", "") if _in_resume(d.get("name", ""), rn) else "",
              "contact": [c for c in d.get("contact", []) if isinstance(c, str) and _in_resume(c, rn)]}
     summ = [s for s in re.split(r"(?<=[.!?])\s+", str(d.get("summary", ""))) if s]
     clean["summary"] = " ".join(s for s in summ if _supported(s, resume))
     dropped += [f"summary: {s}" for s in summ if not _supported(s, resume)]
-    clean["skills"] = [s for s in d.get("skills", []) if isinstance(s, str) and _in_resume(s, rn)]
-    dropped += [f"skill: {s}" for s in d.get("skills", []) if isinstance(s, str) and not _in_resume(s, rn)]
+    skills = list(dict.fromkeys(s.strip() for s in d.get("skills", []) if isinstance(s, str) and s.strip()))
+    clean["skills"] = [s for s in skills if _in_resume(s, rn) or (pn and _in_resume(s, pn))]
+    added = [s for s in clean["skills"] if not _in_resume(s, rn)]
+    # owner's permission covers a few relevant skills, not a copy of the posting: AI ones first, capped
+    ai = re.compile(r"\b(ai|llm|rag|agent|prompt|genai|generative|ml|machine learning|embedding|vector|"
+                    r"fine-?tun|inference|pytorch|tensorflow|langchain|openai|anthropic|claude|gpt|transformer)", re.I)
+    cap = config().get("max_added_skills", 6)
+    keep = sorted(added, key=lambda s: not ai.search(s))[:cap]
+    dropped += [f"skill (over the {cap}-skill cap): {s}" for s in added if s not in keep]
+    clean["skills"] = [s for s in clean["skills"] if _in_resume(s, rn) or s in keep]
+    added = [s for s in added if s in keep]
+    dropped += [f"skill: {s}" for s in skills if s not in clean["skills"]]
     clean["experience"] = []
     for e in d.get("experience", []):
         if not isinstance(e, dict) or not _in_resume(e.get("company", ""), rn):
             dropped.append(f"experience: {e.get('company') if isinstance(e, dict) else e}")
             continue
         bullets = [b for b in e.get("bullets", []) if isinstance(b, str) and b.strip()]
-        dropped += [f"bullet: {b}" for b in bullets if not _supported(b, resume)]
+        # a skill taken from the posting may be listed, never claimed as past work
+        ok = lambda b: _supported(b, resume) and not any(_in_resume(a, _norm(b)) for a in added)  # noqa: E731
+        dropped += [f"bullet: {b}" for b in bullets if not ok(b)]
         clean["experience"].append({k: e.get(k, "") if _in_resume(e.get(k, ""), rn) else ""
                                     for k in ("company", "title", "dates", "location")}
-                                   | {"bullets": [b for b in bullets if _supported(b, resume)]})
+                                   | {"bullets": [b for b in bullets if ok(b)]})
     clean["education"] = [{k: ed.get(k, "") for k in ("school", "degree", "dates")}
                           for ed in d.get("education", []) if isinstance(ed, dict) and _in_resume(ed.get("school", ""), rn)]
     clean["other"] = [{"heading": o.get("heading", ""),
                        "items": [i for i in o.get("items", []) if isinstance(i, str) and _supported(i, resume)]}
                       for o in d.get("other", []) if isinstance(o, dict) and o.get("items")]
-    return clean, dropped
+    return clean, dropped, added
 
 
 def _e(s) -> str:
     return htmllib.escape(str(s or ""))
 
 
-def _resume_html(r: dict) -> str:
-    h = [f"<h1>{_e(r['name'])}</h1><p class=c>{' &middot; '.join(_e(c) for c in r['contact'])}</p>"]
+# textutil (used for the applications report .docx) reads CSS px as Word points, so sizes are in px.
+PAGE_CSS = ("body{font-family:Arial;font-size:11px}h1{font-size:17px;margin:0}"
+            "h2{font-size:12px;border-bottom:1px solid #444;margin:10px 0 4px}p{margin:0 0 6px 0}p.c{color:#333}"
+            "ul{margin:0 0 6px 0}")
+RESUME_MARGIN_IN = 0.6
+RENDER_JS = Path(__file__).with_name("assets") / "render.js"
+
+
+def render(spec: dict, pdf: Path | None, docx: Path | None, margin_in: float = RESUME_MARGIN_IN) -> float:
+    """Typeset with macOS AppKit (assets/render.js): PDF (the deliverable) and/or an editable DOCX.
+    Returns how many Letter pages the text fills."""
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(spec, f)
+    try:
+        out = subprocess.run(["osascript", "-l", "JavaScript", str(RENDER_JS), f.name, str(pdf or "-"), str(docx or "-"),
+                              str(margin_in)], capture_output=True, text=True, timeout=120)
+    finally:
+        Path(f.name).unlink(missing_ok=True)
+    for x in (pdf, docx):
+        if x and x.exists():
+            x.chmod(0o600)
+    try:
+        return float(json.loads(out.stdout)["pages"])
+    except (ValueError, KeyError):
+        raise RuntimeError(f"render failed: {out.stderr.strip()[:200]}")
+
+
+def _heading(t: str) -> dict:
+    return {"text": t.upper(), "size": 10.5, "bold": True, "rule": True, "before": 7, "after": 3}
+
+
+def _resume_blocks(r: dict) -> list[dict]:
+    B = [{"text": r["name"] or " ", "size": 18, "bold": True, "after": 1},
+         {"text": "  ·  ".join(r["contact"]) or " ", "size": 9.5, "gray": 0.3, "after": 3}]
     if r["summary"]:
-        h.append(f"<h2>Summary</h2><p>{_e(r['summary'])}</p>")
+        B += [_heading("Summary"), {"text": r["summary"], "size": 10.5, "after": 1}]
     if r["skills"]:
-        h.append(f"<h2>Skills</h2><p>{', '.join(_e(s) for s in r['skills'])}</p>")
+        B += [_heading("Skills"), {"text": ", ".join(r["skills"]), "size": 10.5, "after": 1}]
     if r["experience"]:
-        h.append("<h2>Experience</h2>")
+        B.append(_heading("Experience"))
         for e in r["experience"]:
-            h.append(f"<p><b>{_e(e['title'])}</b> &mdash; {_e(e['company'])}"
-                     f"{', ' + _e(e['location']) if e['location'] else ''}<br><i>{_e(e['dates'])}</i></p>"
-                     "<ul>" + "".join(f"<li>{_e(b)}</li>" for b in e["bullets"]) + "</ul>")
+            where = "  ·  ".join(x for x in (e["company"], e["location"]) if x)
+            B.append({"runs": [{"text": e["title"] or e["company"], "bold": True}]
+                      + ([{"text": f"  ·  {where}"}] if e["title"] else []),
+                      "right": e["dates"], "ritalic": True, "size": 10.5, "before": 4, "after": 1})
+            B += [{"text": f"•\t{b}", "indent": 11, "size": 10.5, "after": 1} for b in e["bullets"]]
     if r["education"]:
-        h.append("<h2>Education</h2>" + "".join(
-            f"<p><b>{_e(ed['degree'])}</b> &mdash; {_e(ed['school'])} <i>{_e(ed['dates'])}</i></p>" for ed in r["education"]))
+        B.append(_heading("Education"))
+        B += [{"runs": [{"text": ed["degree"] or ed["school"], "bold": True}]
+               + ([{"text": f"  ·  {ed['school']}"}] if ed["degree"] else []),
+               "right": ed["dates"], "ritalic": True, "size": 10.5, "after": 1} for ed in r["education"]]
     for o in r["other"]:
         if o["items"]:
-            h.append(f"<h2>{_e(o['heading'])}</h2><ul>" + "".join(f"<li>{_e(i)}</li>" for i in o["items"]) + "</ul>")
-    return _page("".join(h))
+            B += [_heading(o["heading"] or "Other")] + [{"text": f"•\t{i}", "indent": 11, "size": 10.5, "after": 1}
+                                                       for i in o["items"]]
+    return B
 
 
-def _page(body: str) -> str:
-    return ("<html><head><meta charset='utf-8'><style>body{font-family:Calibri,Helvetica;font-size:11pt}"
-            "h1{font-size:18pt;margin:0}h2{font-size:12pt;border-bottom:1px solid #444;margin:10pt 0 4pt}"
-            "p.c{color:#333}ul{margin:0 0 6pt 0}</style></head><body>" + body + "</body></html>")
+def _letter_blocks(r: dict, greeting: str, paras: list[str], closing: str) -> list[dict]:
+    return ([{"text": r["name"] or " ", "size": 16, "bold": True, "after": 1},
+             {"text": "  ·  ".join(r["contact"]) or " ", "size": 9.5, "gray": 0.3, "after": 18},
+             {"text": f"{date.today():%B %d, %Y}", "size": 11, "after": 12},
+             {"text": greeting, "size": 11, "after": 8}]
+            + [{"text": p, "size": 11, "after": 8, "line": 1.1} for p in paras]
+            + [{"text": closing, "size": 11, "before": 4, "after": 2}, {"text": r["name"] or " ", "size": 11}])
+
+
+def fit_one_page(res: dict, folder: Path) -> list[str]:
+    """Measure the typeset resume; while it's longer than one page, cut the least important line: extra skills,
+    then the last bullet of the role with the most bullets (older roles first on ties), then 'other' items, then
+    the summary's last sentence. Writes resume.pdf + resume.docx. Returns what was cut."""
+    cut = []
+    for _ in range(40):
+        if render({"blocks": _resume_blocks(res)}, None, None) <= 0.99:
+            break
+        if len(res["skills"]) > 16:
+            cut.append(f"skill: {res['skills'].pop()}")
+            continue
+        roles = [e for e in res["experience"] if len(e["bullets"]) > 2] or [e for e in res["experience"] if len(e["bullets"]) > 1]
+        if roles:
+            role = max(reversed(roles), key=lambda e: len(e["bullets"]))
+            cut.append(f"bullet ({role['company']}): {role['bullets'].pop()}")
+            continue
+        items = [o for o in res["other"] if o["items"]]
+        if items:
+            cut.append(f"{items[-1]['heading']}: {items[-1]['items'].pop()}")
+            continue
+        sents = re.split(r"(?<=[.!?])\s+", res["summary"])
+        if len(sents) > 1:
+            res["summary"] = " ".join(sents[:-1])
+            cut.append(f"summary: {sents[-1]}")
+            continue
+        break
+    render({"blocks": _resume_blocks(res)}, folder / "resume.pdf", folder / "resume.docx")
+    return cut
+
+
+def _page(body: str, css: str = PAGE_CSS) -> str:
+    return f"<html><head><meta charset='utf-8'><style>{css}</style></head><body>{body}</body></html>"
 
 
 def _docx(html: str, path: Path):
@@ -553,14 +835,21 @@ def _wait_for_memory(gb: float, minutes: int = 60) -> bool:
     return False
 
 
-def make_documents(job: dict, resume: str) -> tuple[Path, list[str]]:
-    """Tailored resume + cover letter (.docx) in ~/.jarvis/jobs/applications/<company>-<title>-<key>/."""
+def make_documents(job: dict, resume: str) -> tuple[Path, list[str], list[str]]:
+    """Tailored resume + cover letter (.docx) in ~/.jarvis/jobs/applications/<company>-<title>-<key>/.
+    Returns (folder, lines removed as unsupported, skills added from the posting)."""
     details(job)
+    extra = config()["add_posting_skills"]
     args = dict(resume=resume[:8000], title=job["title"], company=job["company"], location=job["location"],
-                posting=job["text"][:6000])
-    raw = _ask_json(RESUME_PROMPT.format(**args), WRITE_MODEL, num_ctx=16384)
-    res, dropped = verify_resume(raw, resume)
-    letter = _ask_json(LETTER_PROMPT.format(**args), WRITE_MODEL, num_ctx=16384)
+                posting=job["text"][:6000], posting_skills_rule=POSTING_SKILLS_RULE if extra else ".",
+                summary_rule=SUMMARY_RULE if extra else "", letter_rule=LETTER_RULE if extra else "")
+    draft = _ask_json(RESUME_PROMPT.format(**args), WRITE_MODEL, num_ctx=24576, think=True)
+    raw = _ask_json(REVIEW_RESUME.format(draft=json.dumps(draft, ensure_ascii=False), **args), WRITE_MODEL,
+                    num_ctx=24576, think=True) or draft
+    res, dropped, added = verify_resume(raw, resume, job["text"] if extra else "")
+    letter = _ask_json(LETTER_PROMPT.format(**args), WRITE_MODEL, num_ctx=24576, think=True)
+    letter = _ask_json(REVIEW_LETTER.format(draft=json.dumps(letter, ensure_ascii=False), **args), WRITE_MODEL,
+                       num_ctx=24576, think=True) or letter
     paras = []
     for p in letter.get("paragraphs", []):
         sents = re.split(r"(?<=[.!?])\s+", str(p))
@@ -570,70 +859,198 @@ def make_documents(job: dict, resume: str) -> tuple[Path, list[str]]:
     folder = OUT / re.sub(r"[^A-Za-z0-9]+", "-", f"{job['company']}-{job['title']}")[:60].strip("-")
     folder = folder.with_name(f"{folder.name}-{job['key']}")
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _docx(_resume_html(res), folder / "resume.docx")
-    head = f"<p><b>{_e(res['name'])}</b><br>{'<br>'.join(_e(c) for c in res['contact'])}</p>"
-    _docx(_page(f"{head}<p>{date.today():%B %d, %Y}</p><p>{_e(letter.get('greeting') or 'Dear Hiring Team,')}</p>"
-                + "".join(f"<p>{_e(p)}</p>" for p in paras)
-                + f"<p>{_e(letter.get('closing') or 'Sincerely,')}<br>{_e(res['name'])}</p>"), folder / "cover_letter.docx")
+    trimmed = fit_one_page(res, folder)
+    dropped += [f"cut to fit one page — {t}" for t in trimmed]
+    render({"blocks": _letter_blocks(res, letter.get("greeting") or "Dear Hiring Team,", paras,
+                                     letter.get("closing") or "Sincerely,")},
+           folder / "cover_letter.pdf", folder / "cover_letter.docx", 1.0)
     (folder / "posting.txt").write_text(f"{job['title']} - {job['company']} ({job['location']})\n{job['url']}\n\n{job['text']}")
-    (folder / "check.txt").write_text("Removed because the master resume doesn't support it:\n"
-                                      + ("\n".join(dropped) if dropped else "(nothing)") + "\n")
+    (folder / "check.txt").write_text(
+        "Skills added from the job posting (not in your master resume; be ready to talk about them):\n"
+        + ("\n".join(f"  {a}" for a in added) if added else "  (none)")
+        + "\n\nRemoved because the master resume doesn't support it:\n"
+        + ("\n".join(f"  {d}" for d in dropped) if dropped else "  (nothing)") + "\n")
     for f in ("posting.txt", "check.txt"):
         (folder / f).chmod(0o600)
-    return folder, dropped
+    meta = {"key": job["key"], "added_skills": added, "removed": len(dropped)}
+    _write_private(folder / "meta.json", meta)
+    return folder, dropped, added
 
 
 # --- search --------------------------------------------------------------------------
 
-def search(max_scored: int = 40) -> tuple[list[dict], dict]:
+def search(max_scored: int = 150) -> tuple[list[dict], dict]:
     """New matching postings from the configured companies; those without visa-sponsorship evidence are skipped
-    (and remembered, so they aren't re-checked), the rest scored locally. Returns (new matches best first, skip
-    counts by reason)."""
+    (and remembered, so they aren't re-checked). Up to `max_scored` of the rest are scored locally, newest first and
+    spread across companies; the others wait for the next run. Returns (new matches best first, skip counts)."""
     conf, st = config(), _load()
     resume = resume_text()
     new, skipped = [], {"no sponsorship": 0, "sponsorship unconfirmed": 0}
+    queue: dict[str, list] = {}
     for c in conf["companies"]:
         try:
-            jobs = fetch(c, conf)
+            jobs = [j for j in fetch(c, conf) if j["key"] not in st["postings"] and matches(j, conf)]
         except Exception as e:  # noqa: BLE001 - one broken board doesn't stop the rest
             print(f"{c.get('name')}: {e}")
             continue
         for j in jobs:
-            if j["key"] in st["postings"] or not matches(j, conf):
+            details(j)
+            fits, level = level_ok(j, conf)
+            if not fits:
+                skipped["experience"] = skipped.get("experience", 0) + 1
+                st["postings"][j["key"]] = {k: v for k, v in j.items() if k != "text"} | {
+                    "status": "level", "level": level, "fit": 0, "found": date.today().isoformat()}
                 continue
-            if len(new) >= max_scored:
-                break  # the rest is scored next run
+            j["level"] = level
             try:
                 ok, evidence = visa_ok(j, c, conf)
             except Exception as e:  # noqa: BLE001 - try again next run
                 print(f"{c['name']} {j['title']}: {e}")
                 continue
             j.update(visa=evidence, found=date.today().isoformat())
-            if not ok:
+            if ok:
+                queue.setdefault(c["name"], []).append(j)
+            else:
                 skipped["no sponsorship" if evidence.startswith("posting") else "sponsorship unconfirmed"] += 1
                 st["postings"][j["key"]] = {k: v for k, v in j.items() if k != "text"} | {"status": "no_visa", "fit": 0}
-                continue
+    for q in queue.values():
+        q.sort(key=lambda j: _posted(j["posted"]), reverse=True)
+    while queue and len(new) < max_scored:  # round-robin: one per company per pass
+        for name in list(queue):
+            if len(new) >= max_scored:
+                break
+            j = queue[name].pop(0)
+            if not queue[name]:
+                del queue[name]
             j.update(score(j, resume), status="new")
             st["postings"][j["key"]] = {k: v for k, v in j.items() if k != "text"}
             new.append(j)
+        _write_private(STORE, st)
+    _deep_scores(new, st, conf, resume)
     _write_private(STORE, st)
     return sorted(new, key=lambda j: -j["fit"]), skipped
+
+
+def _deep_scores(new: list[dict], st: dict, conf: dict, resume: str):
+    """Second opinion: the larger model (thinking) re-scores the promising ones; its score is the one that counts.
+    Leftover slots go to earlier finds still waiting for it (best quick score first). Saves as it goes."""
+    deep = sorted((j for j in new if j["fit"] >= conf["quick_fit_min"]), key=lambda j: -j["fit"])[:conf["deep_scores_per_day"]]
+    backlog = sorted((p for p in st["postings"].values() if p.get("status") == "new" and p.get("scored_by") != "deep"
+                      and p.get("fit", 0) >= conf["quick_fit_min"] and p["key"] not in {j["key"] for j in new}),
+                     key=lambda p: -p["fit"])
+    boards: dict = {}
+    for p in backlog:
+        if len(deep) >= conf["deep_scores_per_day"]:
+            break
+        b = (p["company"], p["board"], p["slug"])
+        if b not in boards:
+            try:
+                boards[b] = {j["key"]: j for j in fetch({**_company(p["company"]), "board": p["board"], "slug": p["slug"]}, conf)}
+            except Exception:  # noqa: BLE001
+                boards[b] = {}
+        j = boards[b].get(p["key"])
+        if j is None:
+            p["status"] = "closed"
+            continue
+        details(j)
+        deep.append({**p, "text": j["text"]})
+    if deep:
+        _unload(SCORE_MODEL)
+        if _wait_for_memory(WRITE_MIN_FREE_GB):
+            for j in deep:
+                if _past_stop():
+                    break
+                j.update(score(j, resume, deep=True), fit_quick=j["fit"])
+                st["postings"][j["key"]].update({k: j[k] for k in ("fit", "fit_quick", "why", "missing", "scored_by")})
+                _write_private(STORE, st)
+            _unload(WRITE_MODEL)
+    _write_private(STORE, st)
+
+
+def _posted(s: str) -> str:
+    """Sortable date from '2026-10-01' or Amazon's 'October  1, 2026'."""
+    try:
+        return datetime.strptime(" ".join(s.split()), "%B %d, %Y").date().isoformat()
+    except ValueError:
+        return s[:10]
 
 
 def _company(name: str) -> dict:
     return next((c for c in config()["companies"] if c["name"] == name), {"name": name})
 
 
-def prepare(key: str) -> tuple[Path, list[str]]:
-    """Documents for one stored posting (CLI: jobs docs KEY)."""
-    st = _load()
-    p = st["postings"][key]
+def prepare(key: str, resume: str | None = None) -> tuple[Path, list[str], list[str]]:
+    """Documents for one stored posting (CLI: jobs docs KEY). The posting is re-read from its board."""
+    p = _load()["postings"][key]
     job = next(j for j in fetch({**_company(p["company"]), "board": p["board"], "slug": p["slug"]}) if j["key"] == key)
     _unload(SCORE_MODEL)
-    folder, dropped = make_documents(job, resume_text())
-    p.update(status="documents", folder=str(folder))
+    folder, dropped, added = make_documents(job, resume or resume_text())
+    st = _load()
+    st["postings"][key].update(status="documents", folder=str(folder), added_skills=added)
     _write_private(STORE, st)
-    return folder, dropped
+    report()
+    return folder, dropped, added
+
+
+# --- the applications document -------------------------------------------------------
+
+REPORT_HTML = HOME / "Applications.html"
+REPORT_DOCX = HOME / "Applications.docx"
+REPORT_PDF = HOME / "Applications.pdf"
+HOW_TO_APPLY = {
+    "greenhouse": "Open the posting → Apply (Greenhouse form): upload resume.pdf + cover_letter.pdf",
+    "lever": "Open the posting → Apply for this job (Lever form): upload both files",
+    "ashby": "Open the posting → Application tab (Ashby form): upload both files",
+    "smartrecruiters": "Open the posting → I'm interested (SmartRecruiters): upload both files",
+    "amazon": "Open the posting → Apply now (sign in to amazon.jobs): upload resume; cover letter optional",
+}
+STATUS_LABEL = {"documents": "Ready to apply", "new": "Match (no documents yet)", "applied": "Applied",
+                "in_review": "In review", "assessment": "Assessment", "interview": "Interview", "offer": "Offer",
+                "rejected": "Rejected", "withdrawn": "Withdrawn"}
+
+
+def report() -> Path:
+    """~/.jarvis/jobs/Applications.html (+ .docx): one row per position with documents (and the best other
+    matches): position, how/where to apply, where the tailored resume and cover letter are, status."""
+    conf, st = config(), _load()
+    ready = [p for p in st["postings"].values() if p.get("folder")]
+    ready.sort(key=lambda p: (p.get("status") != "documents", -p.get("fit", 0)))
+    more = sorted((p for p in st["postings"].values() if p.get("status") == "new" and p.get("fit", 0) >= conf["min_fit"]),
+                  key=lambda p: -p.get("fit", 0))[:40]
+    home = str(Path.home())
+
+    def row(i, p, docs):
+        folder = Path(p["folder"]) if docs else None
+        f = lambda name: (f"<a href='file://{_e(folder / name)}'>{name}</a>" if folder else "—")  # noqa: E731
+        pdf = lambda name: name.replace(".docx", ".pdf") if folder and (folder / name.replace(".docx", ".pdf")).exists() else name  # noqa: E731
+        added = ", ".join(p.get("added_skills", [])[:8])
+        return (f"<tr><td>{i}</td><td><b>{_e(p['company'])}</b><br>{_e(p['title'])}<br><small>{_e(p['location'][:70])}"
+                f"</small></td><td><nobr>{p.get('fit', '')}/10</nobr><br><small>{_e(p.get('level', ''))}</small></td>"
+                f"<td><a href='{_e(p['url'])}'>Posting / apply</a><br><small>{_e(HOW_TO_APPLY.get(p['board'], 'Open the posting and apply'))}"
+                f"</small></td><td>{f(pdf('resume.docx'))}<br>{f(pdf('cover_letter.docx'))}"
+                + (f"<br><small>{_e(str(folder).replace(home, '~'))}</small>" if folder else
+                   f"<br><small>make them: python3 -m jarvis jobs docs {p['key']}</small>")
+                + (f"<br><small>Added from posting: {_e(added)}</small>" if added else "")
+                + f"</td><td><small>{_e(p.get('visa', ''))}</small></td>"
+                f"<td>{_e(STATUS_LABEL.get(p.get('status'), p.get('status', '')))}</td></tr>")
+
+    widths = (18, 150, 40, 160, 175, 85, 62)  # 690 pt: fits a landscape page with 0.4in margins
+    head = ("".join(f"<col width='{w}'>" for w in widths) +
+            "<tr><th>#</th><th>Position</th><th>Fit</th><th>Where / how to apply</th><th>Tailored resume & cover "
+            "letter</th><th>Visa</th><th>Status</th></tr>")
+    html = (f"<h1>Job applications</h1><p>Updated {datetime.now():%B %d, %Y %H:%M}. {len(ready)} position(s) with "
+            f"tailored documents (PDF to send; DOCX copy to edit). Review each one (check.txt lists skills added from the posting) before applying."
+            f"</p><h2>Ready to apply</h2><table>{head}"
+            + "".join(row(i, p, True) for i, p in enumerate(ready, 1)) + "</table>"
+            + (f"<h2>Other good matches (fit ≥ {conf['min_fit']}/10, best first)</h2><table>{head}"
+               + "".join(row(i, p, False) for i, p in enumerate(more, 1)) + "</table>" if more else ""))
+    page = _page(html).replace("</style>", "table{border-collapse:collapse;width:690px;table-layout:fixed}td,th{border:1px solid #bbb;"
+                               "padding:4px;vertical-align:top;font-size:10px}th{background:#eee}</style>")
+    REPORT_HTML.write_text(page)
+    REPORT_HTML.chmod(0o600)
+    _docx(page, REPORT_DOCX)
+    render({"source": str(REPORT_HTML), "landscape": True}, REPORT_PDF, None, 0.4)
+    return REPORT_HTML
 
 
 # --- Gmail tracking ----------------------------------------------------------------
@@ -664,8 +1081,9 @@ def _app_key(company: str, role: str) -> str:
     return f"{_norm(company)}|{_norm(role)}"
 
 
-def track(months: int | None = None, max_opened: int = 40) -> list[str]:
-    """Read new job-related emails with the local model and update application statuses. Returns change lines."""
+def track(months: int | None = None, max_opened: int = 40) -> list[dict]:
+    """Read new job-related emails with the local model and update application statuses. Returns the new events
+    (also kept in jobs.json "events" for the weekly summary)."""
     consent.require("jobs", "track your job applications")
     consent.require("email", "job applications: read job-related emails, read-only, processed locally")
     from . import google
@@ -709,9 +1127,11 @@ def track(months: int | None = None, max_opened: int = 40) -> list[str]:
             key = same[0] if len(same) == 1 else key
         a = apps.setdefault(key, {"company": d["company"][:80], "role": str(d.get("role", ""))[:120],
                                   "history": []})
-        if a.get("status") != d["status"]:
-            changes.append(f"{a['company']} — {a['role'] or 'role?'}: {d['status'].replace('_', ' ')}"
-                           + (f" ({d['next_step'][:60]})" if d.get("next_step") else ""))
+        if a.get("status") != d["status"] or d["status"] in ("interview", "in_review", "assessment"):
+            ev = {"date": when, "company": a["company"], "role": a["role"], "status": d["status"],
+                  "next_step": str(d.get("next_step", ""))[:120], "subject": subject[:100]}
+            st.setdefault("events", []).append(ev)
+            changes.append(ev)
         a.update(status=d["status"], updated=when, next_step=str(d.get("next_step", ""))[:120])
         a["history"].append([when, d["status"]])
         for p in st.get("postings", {}).values():  # link to a posting Jarvis found
@@ -720,6 +1140,7 @@ def track(months: int | None = None, max_opened: int = 40) -> list[str]:
     if complete and not months:
         st["gmail_after"] = int(time.time()) - 3600
     st["seen"] = list(seen)[-3000:]
+    st["events"] = [e for e in st.get("events", []) if e["date"] >= (date.today() - timedelta(days=60)).isoformat()]
     _write_private(STORE, st)
     return changes
 
@@ -754,11 +1175,87 @@ def listing() -> str:
     return "\n".join(lines)
 
 
-def run():
-    """Daily (launchd com.jarvis.jobs, 04:00): search -> score -> documents for the best few -> Gmail tracking ->
-    one Telegram summary. Yields to the incubator and unloads its models when done."""
+NOTIFY_NOW = ("interview", "in_review", "assessment", "offer")  # interview requests / recruiter updates
+GROUPS = [("📅 Interviews", ("interview",)), ("🎉 Offers", ("offer",)),
+          ("➡️ Moving forward", ("in_review", "assessment")), ("❌ Rejections", ("rejected",)),
+          ("📨 Applications confirmed", ("applied",)), ("↩️ Withdrawn", ("withdrawn",))]
+
+
+def _event_line(e: dict) -> str:
+    return (f"• {e['company']} — {e['role'] or 'role?'}" + (f": {e['next_step']}" if e.get("next_step") else "")
+            + f" ({e['date'][5:]})")
+
+
+def _past_stop() -> bool:
+    return datetime.now().strftime("%H:%M") >= config().get("stop_by", "23:59") and datetime.now().hour >= 5
+
+
+def make_week_documents(limit: int | None = None) -> tuple[int, list[str], int]:
+    """Resume + cover letter for the week's best-ranked new positions (fit >= min_fit, top docs_per_week; ties:
+    newest first)."""
+    conf = config()
+    st = _load()
+    if any(p.get("status") == "new" and p.get("scored_by") != "deep" and p.get("fit", 0) >= conf["quick_fit_min"]
+           for p in st["postings"].values()):
+        _deep_scores([], st, conf, resume_text())  # finish the week's careful scores first
+    todo = sorted((p for p in _load()["postings"].values()
+                   if p.get("status") == "new" and p.get("scored_by") == "deep" and p.get("fit", 0) >= conf["min_fit"]),
+                  key=lambda p: (p["fit"], _posted(p.get("posted", ""))), reverse=True)[:limit or conf["docs_per_week"]]
+    if not todo:
+        return 0, [], 0
+    _unload(SCORE_MODEL)
+    if not _wait_for_memory(WRITE_MIN_FREE_GB):
+        raise MemoryError("not enough free memory for the writing model")
+    resume, made, lines, left = resume_text(), 0, [], 0
+    for i, j in enumerate(todo):
+        if _past_stop():
+            left = len(todo) - i  # the rest continues tomorrow morning (docs_pending)
+            break
+        try:
+            folder, dropped, added = prepare(j["key"], resume)
+        except StopIteration:  # the posting closed since it was found
+            st = _load()
+            st["postings"][j["key"]]["status"] = "closed"
+            _write_private(STORE, st)
+            continue
+        made += 1
+        lines.append(f"• {j['fit']}/10 {j['company']} — {j['title']}")
+        if conf["send_documents"]:
+            for f in ("resume.pdf", "cover_letter.pdf"):
+                _send_file(folder / f, f"{j['company']} — {j['title']}")
+    return made, lines, left
+
+
+def weekly_summary(made: int, doc_lines: list[str], today: date) -> str:
+    st, conf = _load(), config()
+    since = (today - timedelta(days=7)).isoformat()
+    events = [e for e in st.get("events", []) if e["date"] >= since]
+    parts = [f"🗓 Weekly job update ({(today - timedelta(days=7)):%b %d} – {today - timedelta(days=1):%b %d})"]
+    for label, statuses in GROUPS:
+        group = [e for e in events if e["status"] in statuses]
+        if group:
+            parts.append(f"{label} ({len(group)}):\n" + "\n".join(_event_line(e) for e in group[:15]))
+    if not events:
+        parts.append("No application emails this week.")
+    found = [p for p in st["postings"].values() if p.get("found", "") >= since and p.get("status") not in ("level", "no_visa")]
+    good = [p for p in found if p.get("fit", 0) >= conf["min_fit"]]
+    parts.append(f"💼 New positions this week: {len(found)} with visa sponsorship at your level, {len(good)} "
+                 f"good matches (fit ≥ {conf['min_fit']}/10).")
+    if made:
+        parts.append(f"📝 Tailored resume + cover letter ready for {made} position(s):\n" + "\n".join(doc_lines[:20])
+                     + ("\n…" if len(doc_lines) > 20 else "")
+                     + "\n📋 Apply links and document locations: ~/Job Applications/Applications.html (attached)")
+    return "\n\n".join(parts)
+
+
+def run(today: date | None = None):
+    """Daily 05:00 (launchd com.jarvis.jobs): Gmail tracking + search for new positions.
+    Telegram: right away only for interview requests / recruiter updates (never rejections). Mondays (or the first
+    run after a missed Monday): resumes + cover letters for the week's new positions, then one weekly summary with
+    the report attached. Yields to the incubator and unloads its models when done."""
     from .google import _incubator_busy
     from .reminders import send
+    today = today or date.today()
     if not consent.granted("jobs"):
         print("consent 'jobs' not granted: python3 -m jarvis consent grant jobs")
         return
@@ -769,45 +1266,47 @@ def run():
     else:
         print(f"{datetime.now():%F %H:%M} skipped: the incubator was busy for 45 min")
         return
-    conf, msg = config(), []
+    conf, log = config(), []
+    week = f"{today.isocalendar()[0]}-W{today.isocalendar()[1]:02d}"
     try:
-        if conf["search_daily"] and conf["companies"]:
-            new, skipped = search()
-            good = [j for j in new if j["fit"] >= conf["min_fit"]]
-            if new:
-                msg.append(f"💼 {len(new)} new position(s) with visa sponsorship, {len(good)} with fit ≥ {conf['min_fit']}:")
-                msg += [f"• {j['fit']}/10 {j['company']} — {j['title']} ({j['location'][:60]})\n  {j['why']}\n"
-                        f"  🛂 {j['visa']}\n  {j['url']}\n  key {j['key']}" for j in new[:8]]
-            if any(skipped.values()):
-                msg.append("🚫 Skipped (visa): " + ", ".join(f"{n} {k}" for k, n in skipped.items() if n))
-            todo = good[:conf["docs_per_day"]]
-            if todo:
-                _unload(SCORE_MODEL)
-                if _wait_for_memory(WRITE_MIN_FREE_GB):
-                    resume = resume_text()
-                    st = _load()
-                    for j in todo:
-                        folder, dropped = make_documents(j, resume)
-                        st["postings"][j["key"]].update(status="documents", folder=str(folder))
-                        msg.append(f"📝 Resume + cover letter ready: {j['company']} — {j['title']}\n  "
-                                   f"~/{folder.relative_to(Path.home())}"
-                                   + (f"\n  ({len(dropped)} unsupported line(s) removed, see check.txt)" if dropped else ""))
-                        if conf["send_documents"]:
-                            for f in ("resume.docx", "cover_letter.docx"):
-                                _send_file(folder / f, f"{j['company']} — {j['title']}")
-                    _write_private(STORE, st)
-                else:
-                    msg.append("📝 Documents postponed: not enough free memory (retried tomorrow; or run "
-                               "python3 -m jarvis jobs docs KEY)")
         if consent.granted("email"):
-            changes = track()
-            if changes:
-                msg.append("📬 Application updates:\n" + "\n".join(f"• {c}" for c in changes))
+            events = track()
+            log.append(f"tracking: {len(events)} event(s)")
+            urgent = [e for e in events if e["status"] in NOTIFY_NOW]
+            if urgent:
+                send("📬 Job application update:\n" + "\n".join(
+                    f"{'📅 Interview' if e['status'] == 'interview' else '🎉 Offer' if e['status'] == 'offer' else '➡️ Recruiter update'}"
+                    f" — {e['company']}, {e['role'] or 'role?'}" + (f"\n   {e['next_step']}" if e.get("next_step") else "")
+                    + f"\n   email: “{e['subject']}”" for e in urgent))
+        done = _load().get("weekly_done", "")
+        if (today.weekday() == 0 and done != week) or (done and done < week):  # Monday, or a missed Monday
+            try:
+                made, lines, pending = make_week_documents()
+            except MemoryError as e:
+                made, lines, pending = 0, [f"(documents postponed: {e}; retried tomorrow)"], 0
+            report()
+            send(weekly_summary(made, lines, today)
+                 + (f"\n\n⏳ {pending} more resume set(s) will be finished tomorrow morning." if pending else ""))
+            if REPORT_PDF.exists():
+                _send_file(REPORT_PDF, "Job applications: positions, apply links, document locations")
+            st = _load()
+            st["weekly_done"] = week if made or not lines else st.get("weekly_done", "")
+            st["docs_pending"] = pending
+            _write_private(STORE, st)
+            log.append(f"weekly: {made} document set(s), {pending} pending")
+        elif _load().get("docs_pending"):  # Monday's leftovers, quietly (they're in next Monday's summary)
+            made, _, left = make_week_documents(limit=_load()["docs_pending"])
+            st = _load()
+            st["docs_pending"] = left
+            _write_private(STORE, st)
+            report()
+            log.append(f"leftover documents: {made}")
+        if conf["search_daily"] and conf["companies"] and not _past_stop():
+            new, skipped = search()
+            log.append(f"search: {len(new)} new, skipped {skipped}")
     finally:
         _unload(SCORE_MODEL, WRITE_MODEL)
-    print(f"{datetime.now():%F %H:%M} " + (" | ".join(m.splitlines()[0] for m in msg) or "nothing new"))
-    if msg:
-        send("\n\n".join(msg))
+    print(f"{datetime.now():%F %H:%M} " + " | ".join(log))
 
 
 if __name__ == "__main__":
