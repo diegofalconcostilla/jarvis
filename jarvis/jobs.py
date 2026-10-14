@@ -931,9 +931,10 @@ def search(max_scored: int = 150) -> tuple[list[dict], dict]:
     return sorted(new, key=lambda j: -j["fit"]), skipped
 
 
-def _deep_scores(new: list[dict], st: dict, conf: dict, resume: str):
+def _deep_scores(new: list[dict], st: dict, conf: dict, resume: str) -> bool:
     """Second opinion: the larger model (thinking) re-scores the promising ones; its score is the one that counts.
-    Leftover slots go to earlier finds still waiting for it (best quick score first). Saves as it goes."""
+    Leftover slots go to earlier finds still waiting for it (best quick score first). Saves as it goes.
+    False when the writer model never got enough free memory (nothing was deep-scored)."""
     deep = sorted((j for j in new if j["fit"] >= conf["quick_fit_min"]), key=lambda j: -j["fit"])[:conf["deep_scores_per_day"]]
     backlog = sorted((p for p in st["postings"].values() if p.get("status") == "new" and p.get("scored_by") != "deep"
                       and p.get("fit", 0) >= conf["quick_fit_min"] and p["key"] not in {j["key"] for j in new}),
@@ -954,9 +955,11 @@ def _deep_scores(new: list[dict], st: dict, conf: dict, resume: str):
             continue
         details(j)
         deep.append({**p, "text": j["text"]})
+    ok = True
     if deep:
         _unload(SCORE_MODEL)
-        if _wait_for_memory(WRITE_MIN_FREE_GB):
+        ok = _wait_for_memory(WRITE_MIN_FREE_GB)
+        if ok:
             for j in deep:
                 if _past_stop():
                     break
@@ -965,6 +968,7 @@ def _deep_scores(new: list[dict], st: dict, conf: dict, resume: str):
                 _write_private(STORE, st)
             _unload(WRITE_MODEL)
     _write_private(STORE, st)
+    return ok
 
 
 def _posted(s: str) -> str:
@@ -1197,7 +1201,8 @@ def make_week_documents(limit: int | None = None) -> tuple[int, list[str], int]:
     st = _load()
     if any(p.get("status") == "new" and p.get("scored_by") != "deep" and p.get("fit", 0) >= conf["quick_fit_min"]
            for p in st["postings"].values()):
-        _deep_scores([], st, conf, resume_text())  # finish the week's careful scores first
+        if not _deep_scores([], st, conf, resume_text()):  # finish the week's careful scores first
+            raise MemoryError("not enough free memory for the scoring model")
     todo = sorted((p for p in _load()["postings"].values()
                    if p.get("status") == "new" and p.get("scored_by") == "deep" and p.get("fit", 0) >= conf["min_fit"]),
                   key=lambda p: (p["fit"], _posted(p.get("posted", ""))), reverse=True)[:limit or conf["docs_per_week"]]
@@ -1282,18 +1287,20 @@ def run(today: date | None = None):
         if (today.weekday() == 0 and done != week) or (done and done < week):  # Monday, or a missed Monday
             try:
                 made, lines, pending = make_week_documents()
-            except MemoryError as e:
-                made, lines, pending = 0, [f"(documents postponed: {e}; retried tomorrow)"], 0
-            report()
-            send(weekly_summary(made, lines, today)
-                 + (f"\n\n⏳ {pending} more resume set(s) will be finished tomorrow morning." if pending else ""))
-            if REPORT_PDF.exists():
-                _send_file(REPORT_PDF, "Job applications: positions, apply links, document locations")
-            st = _load()
-            st["weekly_done"] = week if made or not lines else st.get("weekly_done", "")
-            st["docs_pending"] = pending
-            _write_private(STORE, st)
-            log.append(f"weekly: {made} document set(s), {pending} pending")
+            except MemoryError as e:  # no summary yet: tomorrow's run counts as the missed Monday and retries
+                from .google import _available_gb
+                log.append(f"weekly postponed: {e} ({_available_gb():.1f} GB available)")
+            else:
+                report()
+                send(weekly_summary(made, lines, today)
+                     + (f"\n\n⏳ {pending} more resume set(s) will be finished tomorrow morning." if pending else ""))
+                if REPORT_PDF.exists():
+                    _send_file(REPORT_PDF, "Job applications: positions, apply links, document locations")
+                st = _load()
+                st["weekly_done"] = week
+                st["docs_pending"] = pending
+                _write_private(STORE, st)
+                log.append(f"weekly: {made} document set(s), {pending} pending")
         elif _load().get("docs_pending"):  # Monday's leftovers, quietly (they're in next Monday's summary)
             made, _, left = make_week_documents(limit=_load()["docs_pending"])
             st = _load()
