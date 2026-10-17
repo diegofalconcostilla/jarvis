@@ -65,7 +65,7 @@ also uses `email`).
 python3 -m jarvis jobs init          # creates config.json (companies + board/slug, roles, locations) and resume/
 python3 -m jarvis jobs boards        # checks each company's public board (greenhouse, lever, ashby, smartrecruiters)
 python3 -m jarvis jobs search        # new matching postings, scored locally against the master resume
-python3 -m jarvis jobs docs KEY      # resume.docx + cover_letter.docx for one posting (check.txt lists removed lines)
+python3 -m jarvis jobs docs KEY      # resume + cover letter (.pdf, editable .docx) for one posting; optional file_prefix in config (check.txt lists removed lines)
 python3 -m jarvis jobs track --months 6   # one-time: past application emails; then daily
 python3 -m jarvis jobs list
 ```

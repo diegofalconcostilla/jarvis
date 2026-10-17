@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
     "send_documents": False,                 # also send the .docx files to Telegram (your own bot)
     "add_posting_skills": True,              # owner's permission: list the posting's skills/technologies too
     "max_added_skills": 6,                   # ... at most this many per resume, AI-related first
+    "file_prefix": "",                       # e.g. "FirstLast" -> FirstLast_resume.pdf, FirstLast_cover_letter.pdf
 }
 
 # Location name -> (country, lowercase patterns found in postings' location text)
@@ -100,6 +101,12 @@ def init():
 
 def config() -> dict:
     return {**DEFAULT_CONFIG, **(json.loads(CONFIG.read_text()) if CONFIG.exists() else {})}
+
+
+def doc_name(kind: str, ext: str = "pdf") -> str:
+    """File name of a generated document: 'resume'/'cover_letter' plus the owner's file_prefix, if set."""
+    prefix = config().get("file_prefix", "")
+    return f"{prefix}_{kind}.{ext}" if prefix else f"{kind}.{ext}"
 
 
 def _load() -> dict:
@@ -784,7 +791,7 @@ def _letter_blocks(r: dict, greeting: str, paras: list[str], closing: str) -> li
 def fit_one_page(res: dict, folder: Path) -> list[str]:
     """Measure the typeset resume; while it's longer than one page, cut the least important line: extra skills,
     then the last bullet of the role with the most bullets (older roles first on ties), then 'other' items, then
-    the summary's last sentence. Writes resume.pdf + resume.docx. Returns what was cut."""
+    the summary's last sentence. Writes the resume .pdf + .docx (doc_name). Returns what was cut."""
     cut = []
     for _ in range(40):
         if render({"blocks": _resume_blocks(res)}, None, None) <= 0.99:
@@ -807,7 +814,7 @@ def fit_one_page(res: dict, folder: Path) -> list[str]:
             cut.append(f"summary: {sents[-1]}")
             continue
         break
-    render({"blocks": _resume_blocks(res)}, folder / "resume.pdf", folder / "resume.docx")
+    render({"blocks": _resume_blocks(res)}, folder / doc_name("resume"), folder / doc_name("resume", "docx"))
     return cut
 
 
@@ -863,7 +870,7 @@ def make_documents(job: dict, resume: str) -> tuple[Path, list[str], list[str]]:
     dropped += [f"cut to fit one page — {t}" for t in trimmed]
     render({"blocks": _letter_blocks(res, letter.get("greeting") or "Dear Hiring Team,", paras,
                                      letter.get("closing") or "Sincerely,")},
-           folder / "cover_letter.pdf", folder / "cover_letter.docx", 1.0)
+           folder / doc_name("cover_letter"), folder / doc_name("cover_letter", "docx"), 1.0)
     (folder / "posting.txt").write_text(f"{job['title']} - {job['company']} ({job['location']})\n{job['url']}\n\n{job['text']}")
     (folder / "check.txt").write_text(
         "Skills added from the job posting (not in your master resume; be ready to talk about them):\n"
@@ -1002,7 +1009,7 @@ REPORT_HTML = HOME / "Applications.html"
 REPORT_DOCX = HOME / "Applications.docx"
 REPORT_PDF = HOME / "Applications.pdf"
 HOW_TO_APPLY = {
-    "greenhouse": "Open the posting → Apply (Greenhouse form): upload resume.pdf + cover_letter.pdf",
+    "greenhouse": "Open the posting → Apply (Greenhouse form): upload the resume + cover letter PDFs",
     "lever": "Open the posting → Apply for this job (Lever form): upload both files",
     "ashby": "Open the posting → Application tab (Ashby form): upload both files",
     "smartrecruiters": "Open the posting → I'm interested (SmartRecruiters): upload both files",
@@ -1026,12 +1033,12 @@ def report() -> Path:
     def row(i, p, docs):
         folder = Path(p["folder"]) if docs else None
         f = lambda name: (f"<a href='file://{_e(folder / name)}'>{name}</a>" if folder else "—")  # noqa: E731
-        pdf = lambda name: name.replace(".docx", ".pdf") if folder and (folder / name.replace(".docx", ".pdf")).exists() else name  # noqa: E731
+        pdf = lambda kind: doc_name(kind) if folder and (folder / doc_name(kind)).exists() else doc_name(kind, "docx")  # noqa: E731
         added = ", ".join(p.get("added_skills", [])[:8])
         return (f"<tr><td>{i}</td><td><b>{_e(p['company'])}</b><br>{_e(p['title'])}<br><small>{_e(p['location'][:70])}"
                 f"</small></td><td><nobr>{p.get('fit', '')}/10</nobr><br><small>{_e(p.get('level', ''))}</small></td>"
                 f"<td><a href='{_e(p['url'])}'>Posting / apply</a><br><small>{_e(HOW_TO_APPLY.get(p['board'], 'Open the posting and apply'))}"
-                f"</small></td><td>{f(pdf('resume.docx'))}<br>{f(pdf('cover_letter.docx'))}"
+                f"</small></td><td>{f(pdf('resume'))}<br>{f(pdf('cover_letter'))}"
                 + (f"<br><small>{_e(str(folder).replace(home, '~'))}</small>" if folder else
                    f"<br><small>make them: python3 -m jarvis jobs docs {p['key']}</small>")
                 + (f"<br><small>Added from posting: {_e(added)}</small>" if added else "")
@@ -1226,7 +1233,7 @@ def make_week_documents(limit: int | None = None) -> tuple[int, list[str], int]:
         made += 1
         lines.append(f"• {j['fit']}/10 {j['company']} — {j['title']}")
         if conf["send_documents"]:
-            for f in ("resume.pdf", "cover_letter.pdf"):
+            for f in (doc_name("resume"), doc_name("cover_letter")):
                 _send_file(folder / f, f"{j['company']} — {j['title']}")
     return made, lines, left
 
