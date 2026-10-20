@@ -61,6 +61,8 @@ DEFAULT_CONFIG = {
     "add_posting_skills": True,              # owner's permission: list the posting's skills/technologies too
     "max_added_skills": 6,                   # ... at most this many per resume, AI-related first
     "file_prefix": "",                       # e.g. "FirstLast" -> FirstLast_resume.pdf, FirstLast_cover_letter.pdf
+    "exclude_government": False,             # skip military/defense/government work: companies marked
+                                             # "government": true, and postings for government customers/clearances
 }
 
 # Location name -> (country, lowercase patterns found in postings' location text)
@@ -884,6 +886,27 @@ def make_documents(job: dict, resume: str) -> tuple[Path, list[str], list[str]]:
     return folder, dropped, added
 
 
+# --- military / government work ----------------------------------------------------------
+# Titles naming government/defense work, or posting text requiring a clearance or serving defense customers.
+# (Not plain "military"/"veteran": EEO statements mention those in every posting.)
+GOV_TITLE = re.compile(r"\b(government|federal|defen[cs]e|public sector|national security|intelligence community|"
+                       r"dod|usg|classified)\b", re.I)
+GOV_TEXT = re.compile(r"security clearance|clearance (is )?required|(active|current|obtain|maintain)\w* (a |an )?"
+                      r"(ts|secret|top secret)\b|ts/sci|top secret|department of defense|\bdod\b|warfighter|"
+                      r"(defense|military|government) (customers|programs|contracts|operations|agencies)|"
+                      r"national security mission", re.I)
+
+
+def government(job: dict, company: dict) -> str:
+    """Why a posting is military/government work ("" if it isn't): the company is marked, or the title/text says so."""
+    if company.get("government"):
+        return "government/defense company"
+    if GOV_TITLE.search(job["title"]):
+        return "government work (title)"
+    m = GOV_TEXT.search(job.get("text", ""))
+    return f"government work ({m.group(0).lower()})" if m else ""
+
+
 # --- search --------------------------------------------------------------------------
 
 def search(max_scored: int = 150) -> tuple[list[dict], dict]:
@@ -902,6 +925,12 @@ def search(max_scored: int = 150) -> tuple[list[dict], dict]:
             continue
         for j in jobs:
             details(j)
+            gov = government(j, c) if conf.get("exclude_government") else ""
+            if gov:
+                skipped["government"] = skipped.get("government", 0) + 1
+                st["postings"][j["key"]] = {k: v for k, v in j.items() if k != "text"} | {
+                    "status": "government", "why": gov, "fit": 0, "found": date.today().isoformat()}
+                continue
             fits, level = level_ok(j, conf)
             if not fits:
                 skipped["experience"] = skipped.get("experience", 0) + 1

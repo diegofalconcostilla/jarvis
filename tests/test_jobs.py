@@ -73,6 +73,15 @@ class ExperienceLevel(unittest.TestCase):
         self.assertFalse(self.ok("Software Engineer", "0-1 years of experience"))
         self.assertTrue(self.ok("AI Engineer", "We value curiosity."))
 
+    def test_government(self):
+        gov = lambda title, text="", company=None: jobs.government({"title": title, "text": text}, company or {})  # noqa: E731
+        self.assertTrue(gov("Forward Deployed Software Engineer - US Government"))
+        self.assertTrue(gov("Software Engineer", "Must hold an active Secret clearance."))
+        self.assertTrue(gov("Software Engineer", "Build tools for our defense customers."))
+        self.assertTrue(gov("Software Engineer", "", {"government": True}))
+        self.assertFalse(gov("Software Engineer", "All applicants regardless of veteran or military status."))
+        self.assertFalse(gov("AI Engineer", "Ship LLM features to millions of users."))
+
 
 class NothingInvented(unittest.TestCase):
     def test_numbers_must_come_from_the_resume(self):
