@@ -32,6 +32,11 @@ python3 -m unittest discover tests
 
 Then: `python3 -m jarvis ask "..."` (local model), add `--claude` to let Claude answer when within budget.
 
+Optional `setup/06_install_relay.sh`: Claude sessions never use Jarvis's private permissions (`consent.require`
+refuses inside them). They queue a whitelisted request instead (`python3 -m jarvis.relay submit agenda --start
+2026-11-21 --end 2026-11-22`); launchd runs it outside the session and Jarvis answers on your Telegram, so the
+session only sees "sent".
+
 ### What the Ollama service sets (and why)
 
 | Setting | Value | Why |
@@ -64,6 +69,7 @@ also uses `email`).
 ```
 python3 -m jarvis jobs init          # creates config.json (companies + board/slug, roles, locations) and resume/
 #   optional: "exclude_government": true skips military/defense/government work (or mark a company "government": true)
+#   optional: "keep_all_bullets": true uses every master-resume bullet (still one page)
 python3 -m jarvis jobs boards        # checks each company's public board (greenhouse, lever, ashby, smartrecruiters)
 python3 -m jarvis jobs search        # new matching postings, scored locally against the master resume
 python3 -m jarvis jobs docs KEY      # resume + cover letter (.pdf, editable .docx) for one posting; optional file_prefix in config (check.txt lists removed lines)

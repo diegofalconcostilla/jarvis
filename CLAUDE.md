@@ -8,6 +8,11 @@ These are the owner's standing instructions. They override convenience.
 - Install any model (Ollama included), app, or package. Propose it with its size and reason, wait for a yes.
 - Read private data: email, calendar, contacts, messages, browser history, photos, location, keychain, or files outside
   this repo. In code, call `consent.require(scope)` first. Never grant consent yourself or edit `~/.jarvis/consent.json`.
+- Never, even with consent granted: use Jarvis's private permissions from the Claude session (email, calendar,
+  agenda store, resume/jobs data, local accounts). `consent.require` refuses inside a session; don't work around it
+  (no unsetting env vars, no reading the files directly). To act for the owner, queue a request:
+  `python3 -m jarvis.relay submit <action> --json '{...}' --wait 300` — Jarvis runs it outside the session and
+  answers on the owner's Telegram; the session only sees "sent" / "error: <kind>".
 - Commit or publish secrets. Keep the pre-commit hook installed; never use `--no-verify`.
 
 ## Token optimization

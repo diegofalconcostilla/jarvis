@@ -89,6 +89,36 @@ class NothingInvented(unittest.TestCase):
         self.assertFalse(jobs._supported("Led a team of 8 engineers", RESUME))
         self.assertFalse(jobs._supported("5+ years of experience", RESUME))
 
+    def test_keep_all_bullets_falls_back_to_master_wording(self):
+        raw = {"name": "Jane Doe", "experience": [{"company": "Acme Corp", "title": "Data Engineer",
+                                                   "bullets": ["Cut pipeline runtime by 45% for 12 teams"]}]}
+        real = jobs.config
+        try:
+            jobs.config = lambda: {**CONF, "keep_all_bullets": True}
+            clean, dropped, _ = jobs.verify_resume(raw, RESUME)
+            self.assertEqual(clean["experience"][0]["bullets"], ["Cut pipeline runtime by 40% for 12 teams"])
+            jobs.config = lambda: {**CONF, "keep_all_bullets": False}
+            clean, _, _ = jobs.verify_resume(raw, RESUME)
+            self.assertEqual(clean["experience"][0]["bullets"], [])
+        finally:
+            jobs.config = real
+
+    def test_fill_from_master_restores_header_bullets_and_skills(self):
+        res = {"name": "", "contact": [], "summary": "", "skills": ["Python"],
+               "experience": [{"company": "Acme Corp", "title": "Data Engineer", "dates": "2021-2024", "location": "",
+                               "bullets": []}], "education": [], "other": []}
+        real = jobs.config
+        try:
+            jobs.config = lambda: {**CONF, "keep_all_bullets": True}
+            added = jobs.fill_from_master(res, RESUME)
+        finally:
+            jobs.config = real
+        self.assertEqual(res["name"], "Jane Doe")
+        self.assertIn("jane@example.com", res["contact"])
+        self.assertEqual(res["experience"][0]["bullets"], ["Cut pipeline runtime by 40% for 12 teams"])
+        self.assertEqual(res["skills"], ["Python", "SQL", "AWS"])
+        self.assertIn("name", added)
+
     def test_verify_drops_unsupported_content(self):
         raw = {"name": "Jane Doe", "contact": ["jane@example.com", "555-0100"],
                "summary": "Data engineer focused on Python. Has 7 years of Spark experience.",

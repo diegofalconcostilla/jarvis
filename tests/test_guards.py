@@ -1,6 +1,7 @@
 """Proves the guardrails block what they claim to.  Run: python3 -m unittest discover tests"""
 
 import io
+import json
 import os
 import sys
 import tempfile
@@ -55,6 +56,15 @@ class Consent(unittest.TestCase):
             with self.assertRaises(consent.ConsentRequired):
                 consent.require(scope)
 
+    def test_ai_sessions_never_get_private_scopes(self):
+        consent.STORE.write_text(json.dumps({"email": {}, "calendar": {}}))
+        with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            for scope in ("email", "calendar"):
+                with self.assertRaises(consent.ConsentRequired):
+                    consent.require(scope)
+        with mock.patch.dict(os.environ, {v: "" for v in consent.AI_SESSION_VARS}):
+            consent.require("email")  # Jarvis's own jobs still can
+
     def test_scripts_cannot_grant_themselves(self):
         with mock.patch.object(sys, "stdin", io.StringIO("y\n")):  # not a TTY
             self.assertFalse(consent.grant("email"))
@@ -65,7 +75,8 @@ class Consent(unittest.TestCase):
         fake_tty.isatty = lambda: True
         with mock.patch.object(sys, "stdin", fake_tty), mock.patch("builtins.input", return_value="y"):
             self.assertTrue(consent.grant("calendar"))
-        consent.require("calendar")  # no exception now
+        with mock.patch.dict(os.environ, {v: "" for v in consent.AI_SESSION_VARS}):
+            consent.require("calendar")  # no exception now (outside an AI session)
         consent.revoke("calendar")
         self.assertFalse(consent.granted("calendar"))
 

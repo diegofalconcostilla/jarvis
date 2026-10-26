@@ -60,6 +60,8 @@ DEFAULT_CONFIG = {
     "send_documents": False,                 # also send the .docx files to Telegram (your own bot)
     "add_posting_skills": True,              # owner's permission: list the posting's skills/technologies too
     "max_added_skills": 6,                   # ... at most this many per resume, AI-related first
+    "keep_all_bullets": False,               # use every master-resume bullet (reordered/rephrased) instead of
+                                             # picking the best few; the one-page fit still trims if needed
     "file_prefix": "",                       # e.g. "FirstLast" -> FirstLast_resume.pdf, FirstLast_cover_letter.pdf
     "exclude_government": False,             # skip military/defense/government work: companies marked
                                              # "government": true, and postings for government customers/clearances
@@ -587,7 +589,7 @@ RESUME_PROMPT = """Tailor a resume to one job. RULES:
 - You may: choose and reorder the most relevant experience and bullets, rephrase bullets to mirror the job's wording
   (same facts), and write a 2-3 sentence summary from the master resume{summary_rule}.
 - Keep company names, titles and dates exactly as written in the master resume.
-- It MUST fit on ONE page: about 450 words at most; 3-5 bullets for the most relevant role, 2-3 for others;
+- It MUST fit on ONE page: about 450 words at most; {bullets_rule}
   at most 16 skills; summary 2-3 short sentences.
 Answer with ONLY this JSON:
 {{"name": "", "contact": ["email/phone/city/links exactly as in the master resume"], "summary": "",
@@ -618,14 +620,14 @@ JOB: {title} at {company} ({location})
 REVIEW_RESUME = """You are a senior tech recruiter reviewing a tailored resume DRAFT for ONE job. Improve it, then
 return the full improved resume in the same JSON shape as the draft.
 Check and fix:
-- Relevance: the most job-relevant experience and bullets first; drop weak or off-topic bullets.
+- Relevance: the most job-relevant experience and bullets first; {relevance_rule}
 - Keywords: the job's key skills/technologies appear naturally (ATS), named as in the posting{posting_skills_rule}
 - Bullets: start with a strong verb, show scope and impact, one line or two, no filler, no first person.
 - Summary: 2-3 sentences aimed at THIS role, specific, no clichés.
 - Truth: experience, employers, titles, dates, numbers and achievements must match the MASTER RESUME exactly;
   remove anything the master resume doesn't support. Never move a job requirement into an experience bullet.
 - Grammar, consistency (tense, punctuation), no duplicates.
-- Length: it MUST fit on ONE page (about 450 words at most, at most 16 skills); cut the least relevant first.
+- Length: it MUST fit on ONE page (about 450 words at most, at most 16 skills); {length_rule}
 
 MASTER RESUME:
 {resume}
@@ -674,8 +676,96 @@ def _in_resume(s: str, resume_n: str) -> bool:
 POSTING_SKILLS_RULE = (", PLUS the skills, tools and technologies the JOB posting asks for (especially AI: LLMs, "
                        "agents, RAG, prompt engineering, model APIs, ML frameworks), named exactly as in the posting.")
 SUMMARY_RULE = "; it may name skills from the job posting (as skills, never as past results)"
+BULLETS = {False: ("3-5 bullets for the most relevant role, 2-3 for others;", "drop weak or off-topic bullets.",
+                   "cut the least relevant first."),
+           True: ("keep EVERY bullet of the master resume (reorder and rephrase them, never drop or merge them);",
+                  "keep every master-resume bullet (reorder, don't drop).",
+                  "keep every master-resume bullet; shorten wording instead of cutting.")}
 LETTER_RULE = ("\n- You may say the candidate is skilled in / works with technologies the JOB asks for, without "
                "inventing where or how they were used.")
+
+
+def _master_bullets(resume: str) -> list[str]:
+    return [re.sub(r"^\s*[-•*▪●]\s*", "", l).strip() for l in resume.splitlines() if re.match(r"\s*[-•*▪●]\s+\S", l)]
+
+
+def _closest(text: str, lines: list[str], min_overlap: float = 0.3) -> str | None:
+    """The line sharing the most words with `text` (Jaccard >= min_overlap), or None."""
+    w = set(_norm(text).split())
+    best = max(lines, key=lambda l: len(w & set(_norm(l).split())) / (len(w | set(_norm(l).split())) or 1), default=None)
+    if best is None:
+        return None
+    b = set(_norm(best).split())
+    return best if len(w & b) / (len(w | b) or 1) >= min_overlap else None
+
+
+CONTACT = re.compile(r"@|(\+?\d{1,3}[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b|linkedin|github|https?://|www\.", re.I)
+HEADING = re.compile(r"^(summary|profile|skills|technical skills|experience|work experience|professional experience|"
+                     r"education|projects|certifications|awards|publications|languages|volunteering)\b", re.I)
+
+
+def _header(resume: str) -> tuple[str, list[str]]:
+    """Name (first line) and contact items (the top lines with an email/phone/link) of the master resume."""
+    lines = [l.strip() for l in resume.splitlines() if l.strip()]
+    contact = []
+    for l in lines[1:6]:
+        if HEADING.match(l):
+            break  # contact lines come before the first section
+        if CONTACT.search(l) and not re.match(r"\s*[-•*▪●]", l):
+            contact += [c.strip() for c in re.split(r"\s+[|•·]\s+|\s{2,}", l) if c.strip()]
+    return (lines[0] if lines else ""), contact
+
+
+def restore_header(res: dict, resume: str) -> list[str]:
+    """The master resume's name and contact line when the draft dropped or reworded them."""
+    name, contact = _header(resume)
+    out = []
+    if not res.get("name") and name:
+        res["name"] = name
+        out.append("name")
+    if not res.get("contact") and contact:
+        res["contact"] = contact
+        out.append("contact")
+    return out
+
+
+def fill_from_master(res: dict, resume: str) -> list[str]:
+    """Put back master-resume content the tailored draft left out (verbatim; the one-page fit trims it again if it
+    doesn't fit): name/contact if missing, bullets under their role (or their section, e.g. Projects), and skills
+    up to 16. Returns what was added."""
+    added = restore_header(res, resume)
+    lines = [l.rstrip() for l in resume.splitlines() if l.strip()]
+    have = [b for e in res["experience"] for b in e["bullets"]] + [i for o in res["other"] for i in o["items"]]
+    section, owner = "", ""
+    for l in lines:
+        text = re.sub(r"^\s*[-•*▪●]\s*", "", l).strip()
+        if not re.match(r"\s*[-•*▪●]\s+\S", l):
+            if HEADING.match(text) or (text.isupper() and len(text.split()) <= 4):
+                section, owner = text.rstrip(":"), ""
+            else:
+                owner = text
+            continue
+        if _closest(text, have, 0.5):
+            continue  # already there (maybe rephrased)
+        role = next((e for e in res["experience"] if e["company"] and _norm(e["company"]) in _norm(owner)), None)
+        if role is not None:
+            role["bullets"].append(text)
+        elif section and not re.search(r"experience", section, re.I):
+            o = next((o for o in res["other"] if _norm(o["heading"]) == _norm(section)), None)
+            if o is None:
+                res["other"].append(o := {"heading": section.title(), "items": []})
+            o["items"].append(f"{owner}: {text}" if owner and _norm(owner) not in _norm(text) else text)
+        else:
+            continue
+        have.append(text)
+        added.append(f"bullet: {text[:40]}")
+    for l in lines:
+        m = re.match(r"\s*(technical )?skills?\s*[:\-]\s*(.+)", l, re.I)
+        for sk in (re.split(r"\s*[,;|•]\s*", m.group(2)) if m else []):
+            if sk and len(res["skills"]) < 16 and _norm(sk) not in {_norm(x) for x in res["skills"]}:
+                res["skills"].append(sk)
+                added.append(f"skill: {sk}")
+    return added
 
 
 def verify_resume(d: dict, resume: str, posting: str = "") -> tuple[dict, list[str], list[str]]:
@@ -699,7 +789,7 @@ def verify_resume(d: dict, resume: str, posting: str = "") -> tuple[dict, list[s
     clean["skills"] = [s for s in clean["skills"] if _in_resume(s, rn) or s in keep]
     added = [s for s in added if s in keep]
     dropped += [f"skill: {s}" for s in skills if s not in clean["skills"]]
-    clean["experience"] = []
+    clean["experience"], master = [], _master_bullets(resume)
     for e in d.get("experience", []):
         if not isinstance(e, dict) or not _in_resume(e.get("company", ""), rn):
             dropped.append(f"experience: {e.get('company') if isinstance(e, dict) else e}")
@@ -707,10 +797,18 @@ def verify_resume(d: dict, resume: str, posting: str = "") -> tuple[dict, list[s
         bullets = [b for b in e.get("bullets", []) if isinstance(b, str) and b.strip()]
         # a skill taken from the posting may be listed, never claimed as past work
         ok = lambda b: _supported(b, resume) and not any(_in_resume(a, _norm(b)) for a in added)  # noqa: E731
-        dropped += [f"bullet: {b}" for b in bullets if not ok(b)]
+        kept = []
+        for b in bullets:
+            if ok(b):
+                kept.append(b)
+            elif config().get("keep_all_bullets") and (orig := _closest(b, [m for m in master if m not in kept])):
+                kept.append(orig)  # the master's own wording instead of losing the bullet
+                dropped.append(f"bullet (master wording kept instead): {b}")
+            else:
+                dropped.append(f"bullet: {b}")
         clean["experience"].append({k: e.get(k, "") if _in_resume(e.get(k, ""), rn) else ""
                                     for k in ("company", "title", "dates", "location")}
-                                   | {"bullets": [b for b in bullets if ok(b)]})
+                                   | {"bullets": list(dict.fromkeys(kept))})
     clean["education"] = [{k: ed.get(k, "") for k in ("school", "degree", "dates")}
                           for ed in d.get("education", []) if isinstance(ed, dict) and _in_resume(ed.get("school", ""), rn)]
     clean["other"] = [{"heading": o.get("heading", ""),
@@ -852,10 +950,12 @@ def make_documents(job: dict, resume: str) -> tuple[Path, list[str], list[str]]:
     args = dict(resume=resume[:8000], title=job["title"], company=job["company"], location=job["location"],
                 posting=job["text"][:6000], posting_skills_rule=POSTING_SKILLS_RULE if extra else ".",
                 summary_rule=SUMMARY_RULE if extra else "", letter_rule=LETTER_RULE if extra else "")
+    args["bullets_rule"], args["relevance_rule"], args["length_rule"] = BULLETS[bool(config().get("keep_all_bullets"))]
     draft = _ask_json(RESUME_PROMPT.format(**args), WRITE_MODEL, num_ctx=24576, think=True)
     raw = _ask_json(REVIEW_RESUME.format(draft=json.dumps(draft, ensure_ascii=False), **args), WRITE_MODEL,
                     num_ctx=24576, think=True) or draft
     res, dropped, added = verify_resume(raw, resume, job["text"] if extra else "")
+    restored = fill_from_master(res, resume) if config().get("keep_all_bullets") else restore_header(res, resume)
     letter = _ask_json(LETTER_PROMPT.format(**args), WRITE_MODEL, num_ctx=24576, think=True)
     letter = _ask_json(REVIEW_LETTER.format(draft=json.dumps(letter, ensure_ascii=False), **args), WRITE_MODEL,
                        num_ctx=24576, think=True) or letter
@@ -877,6 +977,8 @@ def make_documents(job: dict, resume: str) -> tuple[Path, list[str], list[str]]:
     (folder / "check.txt").write_text(
         "Skills added from the job posting (not in your master resume; be ready to talk about them):\n"
         + ("\n".join(f"  {a}" for a in added) if added else "  (none)")
+        + "\n\nPut back from the master resume (to use the page's free space):\n"
+        + ("\n".join(f"  {r}" for r in restored) if restored else "  (nothing)")
         + "\n\nRemoved because the master resume doesn't support it:\n"
         + ("\n".join(f"  {d}" for d in dropped) if dropped else "  (nothing)") + "\n")
     for f in ("posting.txt", "check.txt"):

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Owner requests relayed by an AI session: runs whenever ~/.jarvis/requests/inbox/ has a file.
+     Installed by setup/06_install_relay.sh. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.jarvis.relay</string>
+    <key>ProgramArguments</key>
+    <array><string>/usr/bin/python3</string><string>-m</string><string>jarvis.relay</string><string>run</string></array>
+    <key>WorkingDirectory</key><string>__REPO__</string>
+    <key>QueueDirectories</key><array><string>__HOME__/.jarvis/requests/inbox</string></array>
+    <key>StandardOutPath</key><string>__HOME__/Library/Logs/jarvis-relay.log</string>
+    <key>StandardErrorPath</key><string>__HOME__/Library/Logs/jarvis-relay.log</string>
+</dict>
+</plist>

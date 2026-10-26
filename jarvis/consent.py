@@ -10,6 +10,7 @@ Scopes are plain names, e.g. "email", "calendar", "contacts", "messages", "brows
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,15 @@ class ConsentRequired(PermissionError):
     pass
 
 
+# Environment variables Claude Code sets in the shells it runs. Jarvis's private permissions are for Jarvis itself
+# (scheduled jobs, local Ollama); an AI session may never use them to read the owner's data, even when granted.
+AI_SESSION_VARS = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT")
+
+
+def in_ai_session() -> bool:
+    return any(os.environ.get(v) for v in AI_SESSION_VARS)
+
+
 def _load() -> dict:
     try:
         return json.loads(STORE.read_text())
@@ -37,7 +47,11 @@ def granted(scope: str) -> bool:
 
 
 def require(scope: str, why: str = ""):
-    """Call before touching private data or installing anything. Raises unless the owner granted it."""
+    """Call before touching private data or installing anything. Raises unless the owner granted it, and always
+    inside an AI (Claude) session: Jarvis's permissions are not the session's."""
+    if in_ai_session():
+        raise ConsentRequired(f"'{scope}' is off-limits to AI sessions: Jarvis's private permissions are only for "
+                              "Jarvis's own jobs (local Ollama, answers sent straight to the owner).")
     if not granted(scope):
         raise ConsentRequired(
             f"'{scope}' needs the owner's consent{f' ({why})' if why else ''}. "

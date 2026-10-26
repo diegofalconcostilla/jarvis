@@ -231,11 +231,15 @@ BACKFILL = HOME / "google_backfill.json"  # resumable progress: pending ids, cou
 
 
 def _available_gb() -> float:
+    """Memory a model could get: total minus what apps really hold (anonymous + wired + compressor). File cache
+    (e.g. model files read earlier) is left out because macOS frees it on demand."""
     import subprocess
     out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
-    pages = sum(int(l.split()[-1].rstrip(".")) for l in out.splitlines()
-                if l.startswith(("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable")))
-    return pages * 16384 / 1e9
+    page = int(re.search(r"page size of (\d+)", out).group(1)) if re.search(r"page size of (\d+)", out) else 16384
+    held = sum(int(l.split()[-1].rstrip(".")) for l in out.splitlines()
+               if l.startswith(("Anonymous pages", "Pages wired down", "Pages occupied by compressor")))
+    total = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout)
+    return (total - held * page) / 1e9
 
 
 def _wait_until_free():

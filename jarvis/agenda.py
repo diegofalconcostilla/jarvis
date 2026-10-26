@@ -1,8 +1,8 @@
 """Agenda: activities with dates, extracted locally by Ollama, stored privately, reminded on Telegram.
 
 Privacy model:
-- The store lives in ~/.jarvis/agenda.json (owner-only, never in git). Both the local model and Claude sessions on
-  this Mac can read it; nothing here sends it anywhere except the short reminders.
+- The store lives in ~/.jarvis/agenda.json (owner-only, never in git). Only Jarvis (local model, scheduled jobs)
+  reads it; AI sessions must not (they ask through jarvis.relay). Nothing here sends it anywhere except reminders.
 - Extraction runs on a LOCAL model (Ollama). Email text never goes to Claude or any cloud model.
 - Reading real email requires the owner's consent (`consent.require("email")`); extracting from text you pass in
   (tests, pasted messages) does not.
