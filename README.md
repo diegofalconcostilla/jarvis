@@ -61,6 +61,23 @@ Model sizing on 32 GB: stay around 30B parameters at Q4 or smaller (~20 GB). A m
   Tune with `JARVIS_FIVE_HOUR_MAX` / `JARVIS_SEVEN_DAY_MAX`.
 - **Send diffs and summaries, not whole files**, and cache anything reused (plans, reviews).
 
+## Screen feedback (on demand)
+
+Ask about what's on your screen; a local vision model answers in a small window. Nothing watches the screen: one
+screenshot per request, read on this Mac, deleted right after.
+
+```
+python3 -m jarvis consent grant screen     # once, at your terminal
+ollama pull qwen2.5vl:7b                   # the vision model (6 GB; ask first)
+python3 -m jarvis screen                   # question window -> capture -> answer window ("Copy" copies it)
+python3 -m jarvis screen --area            # drag over a part (--window: click a window); --deep: bigger model reasons
+```
+
+Keyboard shortcut: Shortcuts app → New Shortcut → add "Run Shell Script" with
+`cd ~/jarvis && /usr/bin/python3 -m jarvis screen` → shortcut details (ⓘ) → Add Keyboard Shortcut (e.g. ⌃⌥⌘J).
+The first run asks for Screen Recording permission (System Settings → Privacy & Security → Screen Recording).
+Text inside screenshots is treated as content, never as instructions.
+
 ## Job applications
 
 Private files in `~/.jarvis/jobs/` (never in git). Consent: `python3 -m jarvis consent grant jobs` (Gmail tracking
@@ -85,7 +102,8 @@ Jarvis never applies for you.
 jarvis/guard.py     API-key detection, secret scanning
 jarvis/consent.py   consent registry (~/.jarvis/consent.json, never in git)
 jarvis/llm.py       ollama() / claude() / ask(), usage-window budget
-jarvis/__main__.py  CLI: check, ask, consent, scan, agenda, jobs
+jarvis/__main__.py  CLI: check, ask, consent, scan, agenda, jobs, screen
+jarvis/screen.py    screen feedback on demand: one screenshot -> local vision model -> answer window
 jarvis/google.py    read-only Gmail + Calendar reader (agenda), processed locally
 jarvis/jobs.py      job applications: public job boards -> local fit score -> tailored resume + cover letter
                     (nothing invented: unsupported employers/skills/numbers are dropped) -> Gmail status tracking

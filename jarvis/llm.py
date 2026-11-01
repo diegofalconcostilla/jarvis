@@ -49,12 +49,16 @@ def installed_models() -> list[str]:
 
 
 def ollama(prompt: str, model: str, *, system: str | None = None, temperature: float = 0.3,
-           num_ctx: int = 8192, json_mode: bool = False, think: bool | None = None) -> str:
+           num_ctx: int = 8192, json_mode: bool = False, think: bool | None = None,
+           images: list[str] | None = None) -> str:
     """One local generation. Only models already installed (installing needs consent: setup/03_pull_model.sh).
-    think: for reasoning models (qwen3, gpt-oss), turn their thinking on/off; None = the model's default."""
+    think: for reasoning models (qwen3, gpt-oss), turn their thinking on/off; None = the model's default.
+    images: base64 images for vision models (e.g. qwen2.5vl)."""
     guard.assert_no_api_billing()
     body = {"model": model, "prompt": prompt, "stream": False,
             "options": {"temperature": temperature, "num_ctx": num_ctx}}
+    if images:
+        body["images"] = images
     if think is not None:
         body["think"] = think
     if system:

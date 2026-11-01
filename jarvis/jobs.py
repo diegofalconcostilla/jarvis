@@ -18,6 +18,7 @@ import hashlib
 import html as htmllib
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -79,7 +80,12 @@ LOCATIONS = {
     "Toronto": ("CA", ["toronto"]),
     "Mexico City": ("MX", ["mexico city", "ciudad de mexico", "ciudad de méxico", "cdmx", "méxico, d", "mexico, d"]),
     "Monterrey": ("MX", ["monterrey", "nuevo leon", "nuevo león", "san pedro garza"]),
+    # anywhere in Mexico, remote from Mexico, or LATAM-wide roles (which include Mexico)
+    "Mexico": ("MX", ["mexico", "méxico", "cdmx", "guadalajara", "monterrey", "latam", "latin america",
+                      "latinoamérica", "latinoamerica"]),
 }
+# Text that must not count as a place (the US state of New Mexico is not Mexico).
+NOT_LOCATIONS = {"Mexico": ["new mexico"], "Mexico City": ["new mexico"]}
 
 STATUSES = ["applied", "in_review", "assessment", "interview", "offer", "rejected", "withdrawn"]
 
@@ -137,6 +143,23 @@ def _text(html: str) -> str:
     return re.sub(r"\s*\n\s*", "\n", text).strip()
 
 
+# Companies whose Ashby-hosted pages are switched off (404) and whose own careers page lists the same postings with
+# each Ashby id and its URL slug. A company in config can add its own with "careers_url".
+CAREERS_PAGES = {"cursor": "https://cursor.com/careers"}
+
+
+def _careers_links(page_url: str) -> dict:
+    """{ashby id: page_url/slug} from a careers page that embeds its Ashby postings ({} if it can't be read)."""
+    try:
+        req = urllib.request.Request(page_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            h = r.read().decode(errors="replace").replace('\\"', '"')
+    except (OSError, ValueError):
+        return {}
+    pairs = re.findall(r'"id":"([0-9a-f-]{36})","title":"(?:[^"\\]|\\.)*?".*?"urlSlug":"([^"]+)"', h)
+    return {i: f"{page_url.rstrip('/')}/{slug}" for i, slug in pairs}
+
+
 def fetch(company: dict, conf: dict | None = None) -> list[dict]:
     """Open postings of one company, normalized: key, company, title, location, url, posted, text (empty = fetched
     later by details(), only for postings that match)."""
@@ -158,13 +181,15 @@ def fetch(company: dict, conf: dict | None = None) -> list[dict]:
                         "posted": datetime.fromtimestamp(j.get("createdAt", 0) / 1000).date().isoformat(),
                         "text": f"{j.get('descriptionPlain', '')}\n{lists}\n{j.get('additionalPlain', '')}"})
     elif board == "ashby":
+        page = company.get("careers_url") or CAREERS_PAGES.get(slug.lower())
+        links = _careers_links(page) if page else {}
         for j in _json(f"https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true").get("jobs", []):
             if not j.get("isListed", True):
                 continue
             locs = [j.get("location", "")] + [s.get("location", "") for s in j.get("secondaryLocations", [])]
             out.append({"id": j["id"], "title": j["title"],
                         "location": " / ".join(filter(None, locs + (["Remote"] if j.get("isRemote") else []))),
-                        "url": j["jobUrl"], "posted": (j.get("publishedAt") or "")[:10],
+                        "url": links.get(j["id"], j["jobUrl"]), "posted": (j.get("publishedAt") or "")[:10],
                         "text": j.get("descriptionPlain") or _text(j.get("descriptionHtml", ""))})
     elif board == "smartrecruiters":
         res = _json(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=100")
@@ -236,8 +261,14 @@ def details(j: dict) -> str:
 def where(job: dict, conf: dict) -> list[str]:
     """The configured locations a posting is in (by its location text)."""
     loc = f" {job['location'].lower()} "
-    return [name for name in conf["locations"]
-            if any(p in loc for p in LOCATIONS.get(name, ("", [name.lower()]))[1])]
+    out = []
+    for name in conf["locations"]:
+        text = loc
+        for bad in NOT_LOCATIONS.get(name, []):
+            text = text.replace(bad, " ")
+        if any(p in text for p in LOCATIONS.get(name, ("", [name.lower()]))[1]):
+            out.append(name)
+    return out
 
 
 def matches(job: dict, conf: dict) -> bool:
@@ -512,7 +543,9 @@ def check_boards(visa: bool = True) -> list[str]:
 
 def resume_text() -> str:
     consent.require("jobs", "read your master resume in ~/.jarvis/jobs/resume, processed locally")
-    files = sorted((p for p in RESUME_DIR.glob("*") if p.suffix.lower() in (".docx", ".pdf", ".txt", ".md", ".rtf")),
+    files = sorted((p for p in RESUME_DIR.glob("*") if p.suffix.lower() in (".docx", ".pdf", ".txt", ".md", ".rtf")
+                    and p.name not in (doc_name("resume"), doc_name("resume", "docx"))
+                    and not re.match(r"\d{3}_", p.name)),  # never one of Jarvis's own tailored copies
                    key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         raise FileNotFoundError(f"put your master resume in {RESUME_DIR}/")
@@ -1121,6 +1154,63 @@ def _company(name: str) -> dict:
     return next((c for c in config()["companies"] if c["name"] == name), {"name": name})
 
 
+OPEN = ("new", "documents")
+
+
+def refresh_open() -> tuple[dict, dict]:
+    """Re-read each board once and mark postings that are no longer listed as "closed" (a board that can't be read
+    changes nothing). Returns ({company: [open, closed]}, {key: "open"/"closed"/"unknown"})."""
+    conf, st = config(), _load()
+    boards: dict = {}
+    counts: dict = {}
+    result: dict = {}
+    for p in st["postings"].values():
+        if p.get("status") not in OPEN:
+            continue
+        b = (p["company"], p["board"], p["slug"])
+        if b not in boards:
+            try:
+                boards[b] = {j["key"]: j["url"] for j in fetch({**_company(p["company"]), "board": p["board"], "slug": p["slug"]}, conf)}
+            except Exception:  # noqa: BLE001 - unknown is not closed
+                boards[b] = None
+        c = counts.setdefault(p["company"], [0, 0])
+        if boards[b] is None:
+            result[p["key"]] = "unknown"
+        elif p["key"] in boards[b]:
+            result[p["key"]] = "open"
+            p["url"] = boards[b][p["key"]]  # e.g. a company moved its postings to its own careers page
+            c[0] += 1
+        else:
+            result[p["key"]] = "closed"
+            p["status"], p["closed_on"] = "closed", date.today().isoformat()
+            c[1] += 1
+    _write_private(STORE, st)
+    return counts, result
+
+
+def location_check(place: str) -> dict:
+    """Dry run for one place (public boards only, nothing saved): is it configured, how many postings match your
+    roles there, and how many the visa rule would keep. {"configured", "no_visa_needed", "companies": {name: [match, kept]}}."""
+    conf = config()
+    probe = {**conf, "locations": [place]}
+    country = LOCATIONS.get(place, ("?", []))[0]
+    out = {"configured": place in conf["locations"], "country": country,
+           "no_visa_needed": country in conf.get("no_visa_needed", []) or not conf["require_sponsorship"], "companies": {}}
+    for c in conf["companies"]:
+        try:
+            found = [j for j in fetch(c, probe) if matches(j, probe)]
+        except Exception:  # noqa: BLE001 - one broken board doesn't stop the rest
+            continue
+        kept = 0
+        for j in found:
+            if not j.get("text"):
+                details(j)
+            kept += visa_ok(j, c, probe)[0]
+        if found:
+            out["companies"][c["name"]] = [len(found), kept]
+    return out
+
+
 def prepare(key: str, resume: str | None = None) -> tuple[Path, list[str], list[str]]:
     """Documents for one stored posting (CLI: jobs docs KEY). The posting is re-read from its board."""
     p = _load()["postings"][key]
@@ -1151,14 +1241,81 @@ STATUS_LABEL = {"documents": "Ready to apply", "new": "Match (no documents yet)"
                 "rejected": "Rejected", "withdrawn": "Withdrawn"}
 
 
+def applied_keys(st: dict) -> set:
+    """Postings you already applied to: their status came from your emails, or an application found in Gmail names
+    the same company and (nearly) the same title."""
+    keys = {k for k, p in st["postings"].items() if p.get("status") in STATUSES}
+    for a in st.get("applications", {}).values():
+        if not a.get("role"):
+            continue
+        same = {k: p for k, p in st["postings"].items() if _norm(p["company"]) == _norm(a["company"])}
+        exact = [k for k, p in same.items() if _norm(p["title"]) == _norm(a["role"])]
+        if exact:
+            keys.update(exact)
+        elif same:
+            r = set(_norm(a["role"]).split())
+            k, p = max(same.items(), key=lambda kp: len(r & set(_norm(kp[1]["title"]).split()))
+                       / len(r | set(_norm(kp[1]["title"]).split())))
+            t = set(_norm(p["title"]).split())
+            if len(r & t) / len(r | t) >= 0.75:
+                keys.add(k)
+    return keys
+
+
+def by_company(postings: list[dict]) -> list[dict]:
+    """Grouped by company (A-Z); inside a company: documents first, best fit first."""
+    return sorted(postings, key=lambda p: (_norm(p["company"]), p.get("status") != "documents", -p.get("fit", 0)))
+
+
+def _grouped_rows(postings: list[dict], row, cols: int, docs: bool = True) -> str:
+    out, last = [], None
+    for i, p in enumerate(postings, 1):
+        if p["company"] != last:
+            last = p["company"]
+            out.append(f"<tr><td colspan='{cols}' style='background:#dde7f3'><b>{_e(last)}</b></td></tr>")
+        out.append(row(i, p, docs))
+    return "".join(out)
+
+
+def ready_postings(st: dict) -> list[dict]:
+    """The report's "Ready to apply" rows, in order: with documents, still open, not applied to, grouped by company."""
+    done = applied_keys(st)
+    return by_company([p for k, p in st["postings"].items()
+                       if p.get("folder") and p.get("status") != "closed" and k not in done])
+
+
+UPLOAD_DIR = HOME / "Resumes para subir"  # never RESUME_DIR: that one holds the owner's master resume
+
+
+def upload_folder() -> int:
+    """~/.jarvis/jobs/Resumes para subir/: resume PDFs numbered like the report's rows. Only replaces the numbered
+    copies it made itself; never touches the master resume folder."""
+    if UPLOAD_DIR.resolve() == RESUME_DIR.resolve():
+        raise RuntimeError("upload folder must not be the master resume folder")
+    UPLOAD_DIR.mkdir(mode=0o700, exist_ok=True)
+    for old in UPLOAD_DIR.glob("[0-9][0-9][0-9]_*.pdf"):
+        old.unlink()
+    n = 0
+    for i, p in enumerate(ready_postings(_load()), 1):
+        src = Path(p["folder"]) / doc_name("resume")
+        if src.exists():
+            dst = UPLOAD_DIR / f"{i:03d}_{re.sub(r'[^A-Za-z0-9]+', '', p['company'])}_{src.name}"
+            shutil.copy2(src, dst)
+            dst.chmod(0o600)
+            n += 1
+    return n
+
+
 def report() -> Path:
     """~/.jarvis/jobs/Applications.html (+ .docx): one row per position with documents (and the best other
     matches): position, how/where to apply, where the tailored resume and cover letter are, status."""
     conf, st = config(), _load()
-    ready = [p for p in st["postings"].values() if p.get("folder")]
-    ready.sort(key=lambda p: (p.get("status") != "documents", -p.get("fit", 0)))
-    more = sorted((p for p in st["postings"].values() if p.get("status") == "new" and p.get("fit", 0) >= conf["min_fit"]),
-                  key=lambda p: -p.get("fit", 0))[:40]
+    done = applied_keys(st)
+    ready = ready_postings(st)
+    closed = sorted((p for p in st["postings"].values() if p.get("folder") and p.get("status") == "closed"),
+                    key=lambda p: (p["company"], p["title"]))
+    more = by_company(sorted((p for k, p in st["postings"].items() if p.get("status") == "new" and k not in done
+                              and p.get("fit", 0) >= conf["min_fit"]), key=lambda p: -p.get("fit", 0))[:40])
     home = str(Path.home())
 
     def row(i, p, docs):
@@ -1168,7 +1325,8 @@ def report() -> Path:
         added = ", ".join(p.get("added_skills", [])[:8])
         return (f"<tr><td>{i}</td><td><b>{_e(p['company'])}</b><br>{_e(p['title'])}<br><small>{_e(p['location'][:70])}"
                 f"</small></td><td><nobr>{p.get('fit', '')}/10</nobr><br><small>{_e(p.get('level', ''))}</small></td>"
-                f"<td><a href='{_e(p['url'])}'>Posting / apply</a><br><small>{_e(HOW_TO_APPLY.get(p['board'], 'Open the posting and apply'))}"
+                f"<td><a href='{_e(p['url'])}'>Posting / apply</a><br><small style='word-break:break-all'>{_e(p['url'])}</small>"
+                f"<br><small>{_e(HOW_TO_APPLY.get(p['board'], 'Open the posting and apply'))}"
                 f"</small></td><td>{f(pdf('resume'))}<br>{f(pdf('cover_letter'))}"
                 + (f"<br><small>{_e(str(folder).replace(home, '~'))}</small>" if folder else
                    f"<br><small>make them: python3 -m jarvis jobs docs {p['key']}</small>")
@@ -1181,11 +1339,15 @@ def report() -> Path:
             "<tr><th>#</th><th>Position</th><th>Fit</th><th>Where / how to apply</th><th>Tailored resume & cover "
             "letter</th><th>Visa</th><th>Status</th></tr>")
     html = (f"<h1>Job applications</h1><p>Updated {datetime.now():%B %d, %Y %H:%M}. {len(ready)} position(s) with "
-            f"tailored documents (PDF to send; DOCX copy to edit). Review each one (check.txt lists skills added from the posting) before applying."
-            f"</p><h2>Ready to apply</h2><table>{head}"
-            + "".join(row(i, p, True) for i, p in enumerate(ready, 1)) + "</table>"
-            + (f"<h2>Other good matches (fit ≥ {conf['min_fit']}/10, best first)</h2><table>{head}"
-               + "".join(row(i, p, False) for i, p in enumerate(more, 1)) + "</table>" if more else ""))
+            f"tailored documents (PDF to send; DOCX copy to edit), grouped by company. Review each one (check.txt lists skills added from the posting) before applying."
+            + (f" {len(done)} position(s) you already applied to are left out." if done else "")
+            + f"</p><h2>Ready to apply</h2><table>{head}"
+            + _grouped_rows(ready, row, len(widths)) + "</table>"
+            + (f"<h2>Other good matches (fit ≥ {conf['min_fit']}/10, by company)</h2><table>{head}"
+               + _grouped_rows(more, row, len(widths), False) + "</table>" if more else "")
+            + (f"<h2>Closed (no longer on the company's board; documents kept)</h2><ul>"
+               + "".join(f"<li>{_e(p['company'])}: {_e(p['title'])} (closed {_e(p.get('closed_on', ''))})</li>" for p in closed)
+               + "</ul>" if closed else ""))
     page = _page(html).replace("</style>", "table{border-collapse:collapse;width:690px;table-layout:fixed}td,th{border:1px solid #bbb;"
                                "padding:4px;vertical-align:top;font-size:10px}th{background:#eee}</style>")
     REPORT_HTML.write_text(page)
@@ -1195,16 +1357,42 @@ def report() -> Path:
     return REPORT_HTML
 
 
+POSITIONS_PDF = HOME / "Positions.pdf"
+
+
+def positions_pdf() -> Path:
+    """~/.jarvis/jobs/Positions.pdf: just two columns, position and URL, grouped by company like the report
+    (closed ones and ones you already applied to left out)."""
+    st = _load()
+    ready = ready_postings(st)
+    rows = _grouped_rows(ready, lambda i, p, _: (f"<tr><td>{i}. {_e(p['title'])}</td><td style='word-break:break-all'>"
+                                                 f"<a href='{_e(p['url'])}'>{_e(p['url'])}</a></td></tr>"), 2)
+    html = (f"<h1>Positions</h1><p>{len(ready)} open position(s) not applied to yet, {datetime.now():%B %d, %Y}.</p><table>"
+            "<col width='300'><col width='390'><tr><th>Position</th><th>URL</th></tr>" + rows + "</table>")
+    page = _page(html).replace("</style>", "table{border-collapse:collapse;width:690px;table-layout:fixed}td,th{border:1px solid #bbb;"
+                               "padding:4px;vertical-align:top;font-size:10px}th{background:#eee}</style>")
+    src = HOME / "Positions.html"
+    src.write_text(page)
+    src.chmod(0o600)
+    render({"source": str(src), "landscape": True}, POSITIONS_PDF, None, 0.4)
+    return POSITIONS_PDF
+
+
 # --- Gmail tracking ----------------------------------------------------------------
 
-JOB_Q = ('(application OR applying OR applied OR candidacy OR candidate OR interview OR "your interest" OR offer '
+# Assessment platforms write on the company's behalf and often land in Promotions, so they're searched there too.
+ASSESS = ("codesignal", "hackerrank", "karat", "codility", "hirevue", "coderpad", "hackerearth", "testgorilla",
+          "byteboard", "qualified.io", "mettl", "canditech", "triplebyte", "woven")
+JOB_Q = ('((application OR applying OR applied OR candidacy OR candidate OR interview OR "your interest" OR offer '
          'OR assessment OR recruiter OR recruiting OR "next steps" OR position) -category:promotions '
-         '-category:social -in:chats')
+         '-category:social -in:chats) OR from:(' + " OR ".join(ASSESS) + ')')
 ATS = re.compile(r"(greenhouse|lever\.co|ashbyhq|smartrecruiters|workday|icims|jobvite|taleo|successfactors|"
-                 r"recruitee|workable|bamboohr|talent|careers|recruit|hiring|jobs@)", re.I)
+                 r"recruitee|workable|bamboohr|talent|careers|recruit|hiring|jobs@|"
+                 + "|".join(re.escape(a) for a in ASSESS) + ")", re.I)
 STRONG = re.compile(r"(thank(s| you) for (applying|your application|your interest)|application (received|"
                     r"submitted|status|update)|we received your application|interview|unfortunately|not (to )?move "
-                    r"forward|other candidates|offer letter|coding (challenge|assessment)|next steps)", re.I)
+                    r"forward|other candidates|offer letter|assessment|(coding|technical|online|take-?home|skills?) "
+                    r"(challenge|test|exercise)|next steps)", re.I)
 
 TRACK_PROMPT = """Is this email about one of the recipient's OWN job applications? Job alerts, newsletters,
 recommendations, recruiting marketing and "jobs you may like" are NOT. Answer with ONLY this JSON:
@@ -1213,6 +1401,8 @@ rejected|withdrawn", "next_step": "short, e.g. 'phone screen Oct 14' or ''"}}
 - applied: confirmation the application was received. in_review: being reviewed / recruiter reached out.
   assessment: coding challenge or test. interview: interview invite or scheduling. offer: an offer.
   rejected: not moving forward. withdrawn: the candidate withdrew.
+- An assessment platform (CodeSignal, HackerRank, Karat, ...) inviting the recipient to a test FOR a company IS
+  about their application: status "assessment", company = the hiring company (e.g. Roblox), never the platform.
 
 From: {sender}
 Subject: {subject}
@@ -1223,29 +1413,37 @@ def _app_key(company: str, role: str) -> str:
     return f"{_norm(company)}|{_norm(role)}"
 
 
-def track(months: int | None = None, max_opened: int = 40) -> list[dict]:
+def track(months: int | None = None, max_opened: int = 40, days: int | None = None, recheck: bool = False,
+          stats: dict | None = None) -> list[dict]:
     """Read new job-related emails with the local model and update application statuses. Returns the new events
-    (also kept in jobs.json "events" for the weekly summary)."""
+    (also kept in jobs.json "events" for the weekly summary). days/recheck: look back that many days, re-reading
+    messages already seen (after a filter fix); stats gets counts only."""
     consent.require("jobs", "track your job applications")
     consent.require("email", "job applications: read job-related emails, read-only, processed locally")
     from . import google
     st = _load()
     apps, seen = st.setdefault("applications", {}), set(st.get("seen", []))
-    if months:
-        since = int((datetime.now(timezone.utc) - timedelta(days=30 * months)).timestamp())
+    if months or days:
+        since = int((datetime.now(timezone.utc) - timedelta(days=days or 30 * months)).timestamp())
     else:
         since = st.get("gmail_after") or int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp())
     ids, page = [], None
+    # job-keyword emails from companies you have documents for or applied to always reach the local model
+    names = sorted({_norm(p["company"]) for p in st.get("postings", {}).values() if p.get("folder")}
+                   | {_norm(a["company"]) for a in apps.values()} - {""})
+    mine = re.compile(r"\b(" + "|".join(re.escape(n).replace(r"\ ", r"\W*") for n in names) + r")\b", re.I) if names else None
     while True:
         res = google._get("https://gmail.googleapis.com/gmail/v1/users/me/messages",
-                          {"q": f"after:{since} {JOB_Q}", "maxResults": 100, **({"pageToken": page} if page else {})})
+                          {"q": f"after:{since} ({JOB_Q})", "maxResults": 100, **({"pageToken": page} if page else {})})
         ids += [m["id"] for m in res.get("messages", [])]
         page = res.get("nextPageToken")
         if not page or len(ids) >= 2000:
             break
     changes, opened, complete = [], 0, True
+    stats = stats if stats is not None else {}
+    stats.update(found=len(ids), filtered=0, classified=0)
     for mid in reversed(ids):  # oldest first, so the latest status wins
-        if mid in seen:
+        if mid in seen and not recheck:
             continue
         if opened >= max_opened:
             complete = False
@@ -1254,14 +1452,16 @@ def track(months: int | None = None, max_opened: int = 40) -> list[dict]:
         meta = google._get(f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{mid}",
                            {"format": "metadata", "metadataHeaders": ["From", "Subject"]})
         sender, subject, snip = google._header(meta, "From"), google._header(meta, "Subject"), meta.get("snippet", "")
-        if not (STRONG.search(f"{subject} {snip}") or ATS.search(sender)):
+        if not (STRONG.search(f"{subject} {snip}") or ATS.search(sender) or (mine and mine.search(sender))):
             continue
         full = google._get(f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{mid}", {"format": "full"})
         opened += 1
+        stats["filtered"] += 1
         d = _ask_json(TRACK_PROMPT.format(sender=sender, subject=subject,
                                           body=google._body(full.get("payload", {}))[:5000]), SCORE_MODEL, 8192)
         if d.get("is_application") is not True or d.get("status") not in STATUSES or not d.get("company"):
             continue
+        stats["classified"] += 1
         when = datetime.fromtimestamp(int(meta["internalDate"]) / 1000).date().isoformat()
         key = _app_key(d["company"], d.get("role", ""))
         if not d.get("role"):  # "your application to X": attach to that company's only open application
@@ -1272,14 +1472,17 @@ def track(months: int | None = None, max_opened: int = 40) -> list[dict]:
         if a.get("status") != d["status"] or d["status"] in ("interview", "in_review", "assessment"):
             ev = {"date": when, "company": a["company"], "role": a["role"], "status": d["status"],
                   "next_step": str(d.get("next_step", ""))[:120], "subject": subject[:100]}
-            st.setdefault("events", []).append(ev)
-            changes.append(ev)
+            same = lambda e: all(e.get(k) == ev[k] for k in ("date", "company", "status", "subject"))  # noqa: E731
+            if not any(same(e) for e in st.get("events", [])):  # a recheck doesn't repeat an event
+                st.setdefault("events", []).append(ev)
+                changes.append(ev)
         a.update(status=d["status"], updated=when, next_step=str(d.get("next_step", ""))[:120])
-        a["history"].append([when, d["status"]])
+        if [when, d["status"]] not in a["history"]:
+            a["history"].append([when, d["status"]])
         for p in st.get("postings", {}).values():  # link to a posting Jarvis found
             if _norm(p["company"]) == _norm(a["company"]) and _norm(p["title"]) == _norm(a["role"]):
                 p["status"] = d["status"]
-    if complete and not months:
+    if complete and not months and not days:
         st["gmail_after"] = int(time.time()) - 3600
     st["seen"] = list(seen)[-3000:]
     st["events"] = [e for e in st.get("events", []) if e["date"] >= (date.today() - timedelta(days=60)).isoformat()]

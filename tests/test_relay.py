@@ -54,6 +54,18 @@ class Relay(unittest.TestCase):
         self.assertEqual(relay.status(rid), "sent")
         self.assertFalse(list(relay.INBOX.glob("*.json")))
 
+    def test_jobs_track_params(self):
+        self.assertEqual(relay.validate("jobs_track", {"days": 3, "recheck": True}), {"days": 3, "recheck": True})
+        with self.assertRaises(ValueError):
+            relay.validate("jobs_track", {"days": "3; rm"})
+
+    def test_long_messages_are_split(self):
+        sent = []
+        with mock.patch("jarvis.reminders.send", sent.append):
+            relay._send_long("\n".join(["x" * 100] * 100))
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(all(len(m) <= 4096 for m in sent))
+
     def test_long_ranges_are_refused(self):
         with self.assertRaises(ValueError):
             relay._days("2026-11-01", "2026-12-31")

@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -46,7 +47,7 @@ class Sponsorship(unittest.TestCase):
 
     def test_locations(self):
         conf = {**jobs.DEFAULT_CONFIG, "locations": list(jobs.LOCATIONS)}
-        self.assertEqual(jobs.where({"location": "México D.F., CDMX, MX"}, conf), ["Mexico City"])
+        self.assertEqual(jobs.where({"location": "México D.F., CDMX, MX"}, conf), ["Mexico City", "Mexico"])
         self.assertEqual(jobs.where({"location": "San Francisco, CA"}, conf), ["California"])
         self.assertEqual(jobs.where({"location": "Austin, TX"}, conf), [])
 
@@ -193,6 +194,162 @@ class Notifications(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertIn("Weekly job update", sent[0])
         self.assertIn("Rejections (1)", sent[0])
+
+
+
+class TrackFilters(unittest.TestCase):
+    def test_assessment_platform_emails_pass_the_filters(self):
+        self.assertTrue(jobs.ATS.search("Roblox via CodeSignal <noreply@codesignal.com>"))
+        self.assertTrue(jobs.ATS.search("HackerRank <noreply@hackerrankforwork.com>"))
+        self.assertTrue(jobs.STRONG.search("Complete your Roblox online assessment"))
+        self.assertTrue(jobs.STRONG.search("Your technical test is ready"))
+        self.assertIn("from:(codesignal OR", jobs.JOB_Q)
+        self.assertIn("platform", jobs.TRACK_PROMPT)
+
+    def test_email_straight_from_an_applied_company_reaches_the_model(self):
+        st = {"postings": {"k": {"company": "Roblox", "title": "Senior SWE", "folder": "/x"}}, "applications": {}}
+        msgs = [{"id": "m1"}]
+        meta = {"payload": {"headers": [{"name": "From", "value": "Roblox <no-reply@roblox.com>"},
+                                        {"name": "Subject", "value": "Your next step with us"}]},
+                "snippet": "Hi, please complete the following", "internalDate": "1793000000000"}
+        get = mock.Mock(side_effect=[{"messages": msgs}, meta, {"payload": {}}])
+        with mock.patch.object(jobs, "_load", return_value=st), mock.patch.object(jobs, "_write_private"), \
+                mock.patch.object(jobs.consent, "require"), mock.patch("jarvis.google._get", get), \
+                mock.patch.object(jobs, "_ask_json", return_value={"is_application": True, "company": "Roblox",
+                                                                     "role": "Senior SWE", "status": "assessment"}):
+            events = jobs.track(days=3, recheck=True)
+        self.assertEqual([e["status"] for e in events], ["assessment"])
+        self.assertEqual(st["postings"]["k"]["status"], "assessment")
+
+
+
+class RefreshOpen(unittest.TestCase):
+    def test_postings_missing_from_the_board_close_and_unreadable_boards_change_nothing(self):
+        st = {"postings": {
+            "a": {"key": "a", "company": "Cursor", "board": "ashby", "slug": "cursor", "status": "documents"},
+            "b": {"key": "b", "company": "Cursor", "board": "ashby", "slug": "cursor", "status": "documents"},
+            "c": {"key": "c", "company": "Down", "board": "lever", "slug": "down", "status": "new"},
+            "d": {"key": "d", "company": "Cursor", "board": "ashby", "slug": "cursor", "status": "applied"}}}
+
+        def fetch(c, conf):
+            if c["slug"] == "down":
+                raise OSError("board unavailable")
+            return [{"key": "a", "url": "https://cursor.com/careers/a"}]
+        with mock.patch.object(jobs, "_load", return_value=st), mock.patch.object(jobs, "_write_private"), \
+                mock.patch.object(jobs, "config", return_value={"companies": []}), mock.patch.object(jobs, "fetch", fetch):
+            counts, result = jobs.refresh_open()
+        self.assertEqual(result, {"a": "open", "b": "closed", "c": "unknown"})
+        self.assertEqual([st["postings"][k]["status"] for k in "abcd"], ["documents", "closed", "new", "applied"])
+        self.assertEqual(counts["Cursor"], [1, 1])
+        self.assertEqual(st["postings"]["a"]["url"], "https://cursor.com/careers/a")
+
+
+class MasterResume(unittest.TestCase):
+    def test_tailored_copies_are_never_read_as_the_master(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(jobs, "RESUME_DIR", Path(d)), \
+                mock.patch.object(jobs.consent, "require"), mock.patch.object(jobs, "config", return_value={"file_prefix": "X"}):
+            Path(d, "master.txt").write_text("MASTER")
+            for name in ("X_resume.pdf", "001_Roblox_X_resume.pdf"):
+                Path(d, name).write_text("tailored")
+            self.assertEqual(jobs.resume_text(), "MASTER")
+
+
+
+class PositionsPdf(unittest.TestCase):
+    def test_only_position_and_url_columns_and_no_closed(self):
+        import tempfile
+        st = {"postings": {"a": {"company": "Cursor", "title": "SWE", "url": "https://x/a", "folder": "/f", "status": "documents", "fit": 8},
+                           "b": {"company": "Gone", "title": "SWE", "url": "https://x/b", "folder": "/f", "status": "closed"}}}
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(jobs, "HOME", Path(d)), \
+                mock.patch.object(jobs, "_load", return_value=st), mock.patch.object(jobs, "render"):
+            jobs.positions_pdf()
+            html = Path(d, "Positions.html").read_text()
+        self.assertIn("<th>Position</th><th>URL</th></tr>", html)
+        self.assertIn("<b>Cursor</b>", html)
+        self.assertEqual(html.count("<th>"), 2)
+        self.assertIn("https://x/a", html)
+        self.assertNotIn("Gone", html)
+
+
+
+class AppliedAndGrouped(unittest.TestCase):
+    def test_applied_positions_found_by_status_or_matching_application(self):
+        st = {"postings": {
+            "a": {"company": "Roblox", "title": "Senior Software Engineer, Automation Tools", "status": "documents"},
+            "b": {"company": "Roblox", "title": "Software Engineer, Payments", "status": "documents"},
+            "c": {"company": "Cursor", "title": "Software Engineer", "status": "assessment"},
+            "d": {"company": "Lyft", "title": "Software Engineer", "status": "documents"}},
+            "applications": {"x": {"company": "roblox", "role": "Senior Software Engineer - Automation Tools"},
+                             "y": {"company": "Lyft", "role": ""}}}
+        self.assertEqual(jobs.applied_keys(st), {"a", "c"})
+
+    def test_grouped_by_company(self):
+        ps = [{"company": "Zoox", "fit": 9}, {"company": "Cursor", "fit": 5}, {"company": "Cursor", "fit": 8}]
+        self.assertEqual([(p["company"], p["fit"]) for p in jobs.by_company(ps)], [("Cursor", 8), ("Cursor", 5), ("Zoox", 9)])
+
+
+
+class UploadFolder(unittest.TestCase):
+    def test_numbered_in_report_order_and_never_the_master_folder(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            for k in ("z", "c"):
+                (d / k).mkdir()
+                (d / k / "X_resume.pdf").write_text(k)
+            st = {"postings": {"z": {"company": "Zoox", "title": "SWE", "folder": str(d / "z"), "status": "documents"},
+                               "c": {"company": "Cursor", "title": "SWE", "folder": str(d / "c"), "status": "documents"}}}
+            (d / "up").mkdir()
+            (d / "up" / "keep.txt").write_text("mine")
+            with mock.patch.object(jobs, "UPLOAD_DIR", d / "up"), mock.patch.object(jobs, "RESUME_DIR", d / "master"), \
+                    mock.patch.object(jobs, "_load", return_value=st), mock.patch.object(jobs, "config", return_value={"file_prefix": "X"}):
+                self.assertEqual(jobs.upload_folder(), 2)
+            self.assertEqual(sorted(f.name for f in (d / "up").iterdir()),
+                             ["001_Cursor_X_resume.pdf", "002_Zoox_X_resume.pdf", "keep.txt"])
+            with mock.patch.object(jobs, "UPLOAD_DIR", d / "master"), mock.patch.object(jobs, "RESUME_DIR", d / "master"), \
+                    self.assertRaises(RuntimeError):
+                jobs.upload_folder()
+
+
+
+class CareersPage(unittest.TestCase):
+    def test_ashby_ids_map_to_the_company_careers_page(self):
+        html = ('{\\"id\\":\\"0ec39ed7-a5dc-4551-bb26-b7f4f9fb4a74\\",\\"title\\":\\"Software Engineer, Growth \\",'
+                '\\"location\\":\\"SF\\",\\"urlSlug\\":\\"software-engineer-growth\\"},'
+                '{\\"id\\":\\"aef8f0e7-37cd-4d6e-96c9-3af72f588bae\\",\\"title\\":\\"RL Data\\",\\"urlSlug\\":\\"rl-data\\"}')
+        resp = mock.MagicMock()
+        resp.__enter__.return_value.read.return_value = html.encode()
+        with mock.patch.object(jobs.urllib.request, "urlopen", return_value=resp):
+            links = jobs._careers_links("https://cursor.com/careers")
+        self.assertEqual(links, {"0ec39ed7-a5dc-4551-bb26-b7f4f9fb4a74": "https://cursor.com/careers/software-engineer-growth",
+                                 "aef8f0e7-37cd-4d6e-96c9-3af72f588bae": "https://cursor.com/careers/rl-data"})
+
+
+
+class LocationCheck(unittest.TestCase):
+    def test_counts_matches_and_visa_for_one_place_without_saving(self):
+        conf = {"locations": ["California"], "roles": ["software engineer"], "exclude": [], "require_sponsorship": True,
+                "no_visa_needed": [], "companies": [{"name": "Acme", "board": "greenhouse", "slug": "acme"}]}
+        posts = [{"title": "Software Engineer", "location": "Mexico City, Mexico", "text": "x"},
+                 {"title": "Software Engineer", "location": "Austin, TX", "text": "x"}]
+        with mock.patch.object(jobs, "config", return_value=conf), mock.patch.object(jobs, "fetch", return_value=posts), \
+                mock.patch.object(jobs, "visa_ok", return_value=(False, "")), mock.patch.object(jobs, "_write_private") as w:
+            r = jobs.location_check("Mexico City")
+        self.assertEqual((r["configured"], r["country"], r["no_visa_needed"]), (False, "MX", False))
+        self.assertEqual(r["companies"], {"Acme": [1, 0]})
+        w.assert_not_called()
+
+
+
+class MexicoLocation(unittest.TestCase):
+    def test_anywhere_in_mexico_remote_or_latam_but_not_new_mexico(self):
+        conf = {"locations": ["Mexico"]}
+        for loc in ("Remote - Mexico", "Guadalajara, Jalisco", "LATAM (Remote)", "Ciudad de México", "Mexico City, MX"):
+            self.assertEqual(jobs.where({"location": loc}, conf), ["Mexico"], loc)
+        for loc in ("Albuquerque, New Mexico", "Santa Fe, NM", "Remote - US"):
+            self.assertEqual(jobs.where({"location": loc}, conf), [], loc)
+        self.assertEqual(jobs.where({"location": "Remote - New Mexico or Mexico"}, conf), ["Mexico"])
 
 
 if __name__ == "__main__":

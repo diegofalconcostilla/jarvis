@@ -84,6 +84,13 @@ def main():
     j.add_argument("--months", type=int)
     s = sub.add_parser("scan")
     s.add_argument("files", nargs="+")
+    sc = sub.add_parser("screen", help="feedback on your screen, on demand (local vision model)")
+    sc.add_argument("-q", "--question", help="skip the question window")
+    grp = sc.add_mutually_exclusive_group()
+    grp.add_argument("--area", action="store_const", const="area", dest="mode", help="drag over the part to capture")
+    grp.add_argument("--window", action="store_const", const="window", dest="mode", help="click a window to capture")
+    sc.add_argument("--deep", action="store_true", help="vision model reads, the bigger model reasons (slower)")
+    sc.add_argument("--telegram", action="store_true", help="also send the answer to Telegram")
     args = p.parse_args()
 
     if args.cmd == "check":
@@ -141,6 +148,9 @@ def main():
             print(jobs.report())
         else:
             jobs.run()
+    elif args.cmd == "screen":
+        from . import screen
+        sys.exit(screen.run(args.question, args.mode, args.deep, args.telegram))
     elif args.cmd == "scan":
         bad = 0
         for f in args.files:
