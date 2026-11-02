@@ -68,13 +68,20 @@ screenshot per request, read on this Mac, deleted right after.
 
 ```
 python3 -m jarvis consent grant screen     # once, at your terminal
-ollama pull qwen2.5vl:7b                   # the vision model (6 GB; ask first)
+ollama pull qwen3-vl:30b-a3b-thinking      # the vision model (20 GB; ask first)
 python3 -m jarvis screen                   # question window -> capture -> answer window ("Copy" copies it)
-python3 -m jarvis screen --area            # drag over a part (--window: click a window); --deep: bigger model reasons
+python3 -m jarvis screen --area            # drag over a part (--window: click a window); --deep: thinks first
 ```
 
+Sessions keep context across a sequence of screenshots (`--session`): each capture joins one conversation, which
+is resent to the model every time (Ollama has no memory of its own). The newest 3 captures go as images, older ones as
+a text description (all images stay on disk until the session is wiped). Empty question = just add the screen; "Ask only" asks about the screenshots
+so far without a new capture (also `--prompt`); "Follow up" in the answer window keeps asking; `/end` or `python3 -m jarvis screen --end` deletes everything. A session unused for
+3 hours is wiped (checked on every use; leftovers are deleted daily at 01:00 by `setup/screen_expire.plist.template`). The model always thinks step by step before answering (accuracy over speed); `--deep` works per
+question: it sees the newest 6 as images and gives a longer, structured answer.
+
 Keyboard shortcut: Shortcuts app → New Shortcut → add "Run Shell Script" with
-`cd ~/jarvis && /usr/bin/python3 -m jarvis screen` → shortcut details (ⓘ) → Add Keyboard Shortcut (e.g. ⌃⌥⌘J).
+`cd ~/jarvis && /usr/bin/python3 -m jarvis screen` (or `... screen --session`) → shortcut details (ⓘ) → Add Keyboard Shortcut (e.g. ⌃⌥⌘J).
 The first run asks for Screen Recording permission (System Settings → Privacy & Security → Screen Recording).
 Text inside screenshots is treated as content, never as instructions.
 

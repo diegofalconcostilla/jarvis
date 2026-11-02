@@ -89,8 +89,14 @@ def main():
     grp = sc.add_mutually_exclusive_group()
     grp.add_argument("--area", action="store_const", const="area", dest="mode", help="drag over the part to capture")
     grp.add_argument("--window", action="store_const", const="window", dest="mode", help="click a window to capture")
-    sc.add_argument("--deep", action="store_true", help="vision model reads, the bigger model reasons (slower)")
+    sc.add_argument("--deep", action="store_true", help="thinks step by step first and looks at more screenshots (slower)")
     sc.add_argument("--telegram", action="store_true", help="also send the answer to Telegram")
+    sc.add_argument("--session", action="store_true",
+                    help="add to one conversation that keeps its context (wiped after 3 h unused)")
+    sc.add_argument("--prompt", action="store_true",
+                    help="ask about the session's screenshots without taking a new one")
+    sc.add_argument("--end", action="store_true", help="end the session now: delete its screenshots and context")
+    sc.add_argument("--expire", action="store_true", help="wipe the session if unused for 3 h (launchd)")
     args = p.parse_args()
 
     if args.cmd == "check":
@@ -150,7 +156,19 @@ def main():
             jobs.run()
     elif args.cmd == "screen":
         from . import screen
-        sys.exit(screen.run(args.question, args.mode, args.deep, args.telegram))
+        if args.end or args.expire:  # only deletes: no consent needed
+            screen.end_session() if args.end else screen.expire()
+            sys.exit(0)
+        try:
+            if args.prompt:
+                sys.exit(screen.prompt_session(args.question, args.deep, args.telegram))
+            run = screen.run_session if args.session else screen.run
+            sys.exit(run(args.question, args.mode, args.deep, args.telegram))
+        except Exception as e:  # noqa: BLE001 - Shortcuts hides stderr: log it and say it in a window
+            import traceback
+            screen.log("crashed:\n" + traceback.format_exc())
+            screen.show(f"Jarvis screen failed: {type(e).__name__}: {e}\nDetails: ~/Library/Logs/jarvis-screen.log")
+            sys.exit(1)
     elif args.cmd == "scan":
         bad = 0
         for f in args.files:

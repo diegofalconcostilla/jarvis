@@ -53,7 +53,7 @@ def ollama(prompt: str, model: str, *, system: str | None = None, temperature: f
            images: list[str] | None = None) -> str:
     """One local generation. Only models already installed (installing needs consent: setup/03_pull_model.sh).
     think: for reasoning models (qwen3, gpt-oss), turn their thinking on/off; None = the model's default.
-    images: base64 images for vision models (e.g. qwen2.5vl)."""
+    images: base64 images for vision models (e.g. qwen3-vl)."""
     guard.assert_no_api_billing()
     body = {"model": model, "prompt": prompt, "stream": False,
             "options": {"temperature": temperature, "num_ctx": num_ctx}}
@@ -67,6 +67,23 @@ def ollama(prompt: str, model: str, *, system: str | None = None, temperature: f
         body["format"] = "json"
     try:
         return _http("/api/generate", body)["response"].strip()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise RuntimeError(f"model {model} isn't installed; install it only with the owner's consent") from e
+        raise
+
+
+def ollama_chat(messages: list[dict], model: str, *, system: str | None = None, temperature: float = 0.3,
+                num_ctx: int = 8192, think: bool | None = None) -> str:
+    """A local conversation: Ollama keeps no memory, so the whole history is sent each time.
+    messages: [{"role": "user"|"assistant", "content": str, "images": [base64, ...] (optional)}]."""
+    guard.assert_no_api_billing()
+    body = {"model": model, "stream": False, "options": {"temperature": temperature, "num_ctx": num_ctx},
+            "messages": ([{"role": "system", "content": system}] if system else []) + messages}
+    if think is not None:
+        body["think"] = think
+    try:
+        return _http("/api/chat", body)["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise RuntimeError(f"model {model} isn't installed; install it only with the owner's consent") from e

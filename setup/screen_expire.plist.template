@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Screen sessions: daily at 01:00, wipe the session's screenshots and context if unused for 3 hours.
+     Only deletes; reads nothing. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.jarvis.screen-expire</string>
+    <key>ProgramArguments</key>
+    <array><string>/usr/bin/python3</string><string>-m</string><string>jarvis</string><string>screen</string><string>--expire</string></array>
+    <key>WorkingDirectory</key><string>__REPO__</string>
+    <key>StartCalendarInterval</key><dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>0</integer></dict>
+    <key>StandardOutPath</key><string>__HOME__/Library/Logs/jarvis-screen-expire.log</string>
+    <key>StandardErrorPath</key><string>__HOME__/Library/Logs/jarvis-screen-expire.log</string>
+</dict>
+</plist>
