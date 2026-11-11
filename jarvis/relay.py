@@ -177,7 +177,26 @@ def jobs_location(p: dict) -> str:
     return "sent"
 
 
+def home_status(p: dict) -> str:
+    """The watched Home Assistant sensors right now, to Telegram (read-only)."""
+    from . import home
+    from .reminders import send
+    send(home.status_text(home.current()))
+    return "sent"
+
+
+def home_digest(p: dict) -> str:
+    """The house's last 24 hours, summarized by the local model, to Telegram."""
+    from . import home
+    from .reminders import send
+    cur = home.current()
+    send(home.digest(home._read(home.HISTORY, {"events": [], "readings": {}}), cur, time.time(), home.config()))
+    return "sent"
+
+
 ACTIONS = {"agenda": (agenda_check, {"start": str, "end": str}),
+           "home_status": (home_status, {}),
+           "home_digest": (home_digest, {}),
            "jobs_location": (jobs_location, {"place": str}),
            "jobs_upload_folder": (jobs_upload_folder, {}),
            "jobs_positions": (jobs_positions, {}),

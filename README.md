@@ -103,6 +103,33 @@ python3 -m jarvis jobs list
 Daily at 05:00 (`setup/jobs.plist.template`): Gmail tracking + search. Mondays: resume + cover letter for every new strong match, then one weekly Telegram summary with Applications.html/.docx. Other days Telegram only for interview requests or recruiter updates (never rejections).
 Jarvis never applies for you.
 
+## Home (Home Assistant)
+
+Jarvis reads your Home Assistant sensors (doors, leaks, temperature, plugs...) every 5 minutes, keeps 7 days of
+changes on this Mac, and lets the local model decide what's worth a Telegram message, plus a daily digest. It is
+**read-only**: it only sends GET requests and has no code that switches, unlocks or changes anything.
+
+Urgent safety alerts (leak, smoke, CO) belong in Home Assistant's own automations to your phone: they fire in seconds
+even when this Mac or Ollama is busy. Jarvis adds judgment on top.
+
+```
+# in Home Assistant: a non-admin user "jarvis" -> profile -> Security -> Long-lived access token
+# in ~/.jarvis/.env (chmod 600):  HA_URL=http://homeassistant.local:8123   HA_TOKEN=<token>
+python3 -m jarvis consent grant home
+setup/07_install_home.sh            # asks, creates ~/.jarvis/home.json, installs com.jarvis.home (every 5 min)
+python3 -m jarvis home check        # connection test: entity counts only
+python3 -m jarvis home status       # the watched sensors now (--telegram also sends it)
+python3 -m jarvis home digest       # last 24 hours, written by the local model
+```
+
+`~/.jarvis/home.json`: `include` / `exclude` (entity patterns; by default every sensor, binary sensor, lock, cover,
+switch, alarm, climate and water heater, minus radio-signal noise; who-is-home entities only if you include them),
+`notes` (context for the model, e.g. "away weekdays 9-18, the cat triggers motion"), `quiet_hours` (messages arrive
+silently; urgent ones still ring), `digest_hour`. The model is `qwen2.5:7b` (`JARVIS_HOME_MODEL`); if another model
+is loaded for a job, the review waits instead of swapping it out. If Home Assistant is unreachable for 30 minutes you
+get one message, and another when it's back. From an AI session: `python3 -m jarvis.relay submit home_status`
+(or `home_digest`).
+
 ## Layout
 
 ```
@@ -112,6 +139,7 @@ jarvis/llm.py       ollama() / claude() / ask(), usage-window budget
 jarvis/__main__.py  CLI: check, ask, consent, scan, agenda, jobs, screen
 jarvis/screen.py    screen feedback on demand: one screenshot -> local vision model -> answer window
 jarvis/google.py    read-only Gmail + Calendar reader (agenda), processed locally
+jarvis/home.py      read-only Home Assistant monitor: changes -> local model decides what to tell you; daily digest
 jarvis/jobs.py      job applications: public job boards -> local fit score -> tailored resume + cover letter
                     (nothing invented: unsupported employers/skills/numbers are dropped) -> Gmail status tracking
 setup/              consent-gated install scripts, Ollama launchd template, pre-commit hook

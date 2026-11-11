@@ -10,6 +10,8 @@
 | Local models reachable from the network | Ollama bound to `127.0.0.1` only; `check` fails if it listens on all interfaces |
 | Secrets committed to a public repo | `.gitignore` for `.env`/keys/consent, pre-commit hook scans staged files for API keys, bot tokens, GitHub/AWS/Google keys and private key blocks |
 | Supply chain | no third-party Python packages |
+| Jarvis acting on the house | `jarvis/home.py` only sends GET requests to Home Assistant (a test fails if a service-call path appears); use a non-admin HA user for its token; consent scope `home`; sensor names and states are treated as data, never instructions |
+| Home Assistant token leaking | kept in `~/.jarvis/.env` (0600), never in git; the secret scanner flags JSON web tokens; revoke it in HA (profile -> Security) if it leaks |
 
 ## Hardening checklist for the Mac (manual, needs your password)
 

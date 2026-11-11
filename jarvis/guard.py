@@ -27,6 +27,7 @@ SECRET_PATTERNS = {
     "AWS access key": r"\bAKIA[0-9A-Z]{16}\b",
     "Google API key": r"\bAIza[0-9A-Za-z_\-]{35}\b",
     "Private key block": r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----",
+    "JSON web token (e.g. Home Assistant)": r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{20,}",
 }
 
 

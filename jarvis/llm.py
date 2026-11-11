@@ -50,10 +50,11 @@ def installed_models() -> list[str]:
 
 def ollama(prompt: str, model: str, *, system: str | None = None, temperature: float = 0.3,
            num_ctx: int = 8192, json_mode: bool = False, think: bool | None = None,
-           images: list[str] | None = None) -> str:
+           images: list[str] | None = None, schema: dict | None = None) -> str:
     """One local generation. Only models already installed (installing needs consent: setup/03_pull_model.sh).
     think: for reasoning models (qwen3, gpt-oss), turn their thinking on/off; None = the model's default.
-    images: base64 images for vision models (e.g. qwen3-vl)."""
+    images: base64 images for vision models (e.g. qwen3-vl).
+    schema: a JSON schema the answer must follow (Ollama constrains the output to it; stricter than json_mode)."""
     guard.assert_no_api_billing()
     body = {"model": model, "prompt": prompt, "stream": False,
             "options": {"temperature": temperature, "num_ctx": num_ctx}}
@@ -63,7 +64,9 @@ def ollama(prompt: str, model: str, *, system: str | None = None, temperature: f
         body["think"] = think
     if system:
         body["system"] = system
-    if json_mode:
+    if schema:
+        body["format"] = schema
+    elif json_mode:
         body["format"] = "json"
     try:
         return _http("/api/generate", body)["response"].strip()

@@ -59,6 +59,12 @@ class Relay(unittest.TestCase):
         with self.assertRaises(ValueError):
             relay.validate("jobs_track", {"days": "3; rm"})
 
+    def test_home_actions_take_no_parameters(self):
+        self.assertEqual(relay.validate("home_status", {}), {})
+        self.assertEqual(relay.validate("home_digest", {}), {})
+        with self.assertRaises(ValueError):
+            relay.validate("home_status", {"entity": "lock.front_door"})
+
     def test_long_messages_are_split(self):
         sent = []
         with mock.patch("jarvis.reminders.send", sent.append):

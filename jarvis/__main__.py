@@ -10,6 +10,9 @@
   jobs init|boards|search|docs KEY|track [--months N]|list|report|run
                           job applications (needs consent: jobs; tracking also email). init = create
                           ~/.jarvis/jobs/config.json; boards = verify company boards; docs = resume + cover letter
+  home init|check|status|digest|tick [--telegram]
+                          Home Assistant, read-only (needs consent: home). init = create ~/.jarvis/home.json;
+                          check = connection test; tick = what launchd runs every 5 minutes
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 from . import consent, guard, llm
@@ -82,6 +87,9 @@ def main():
     j.add_argument("action", choices=["init", "boards", "search", "docs", "track", "list", "report", "run"])
     j.add_argument("key", nargs="?")
     j.add_argument("--months", type=int)
+    h = sub.add_parser("home", help="Home Assistant sensors, read-only")
+    h.add_argument("action", choices=["init", "check", "status", "digest", "tick"])
+    h.add_argument("--telegram", action="store_true", help="status/digest: also send it to Telegram")
     s = sub.add_parser("scan")
     s.add_argument("files", nargs="+")
     sc = sub.add_parser("screen", help="feedback on your screen, on demand (local vision model)")
@@ -169,6 +177,29 @@ def main():
             screen.log("crashed:\n" + traceback.format_exc())
             screen.show(f"Jarvis screen failed: {type(e).__name__}: {e}\nDetails: ~/Library/Logs/jarvis-screen.log")
             sys.exit(1)
+    elif args.cmd == "home":
+        from . import home
+        from .reminders import send
+        try:
+            if args.action == "init":
+                print(f"{home.init()} (edit it: which sensors to watch, notes for the model, quiet hours)")
+            elif args.action == "check":
+                print(home.check())
+            elif args.action == "tick":
+                for m in home.tick():
+                    print(f"{datetime.now():%F %H:%M} sent: {m.splitlines()[0][:80]}")
+            else:
+                if args.action == "status":
+                    text = home.status_text(home.current())
+                else:
+                    cur = home.current()
+                    text = home.digest(home._read(home.HISTORY, {"events": [], "readings": {}}), cur, time.time(),
+                                       home.config())
+                print(text)
+                if args.telegram:
+                    send(text)
+        except consent.ConsentRequired as e:
+            sys.exit(str(e))
     elif args.cmd == "scan":
         bad = 0
         for f in args.files:
