@@ -23,6 +23,7 @@ IGNORE = Path.home() / ".jarvis" / "agenda_ignore.json"  # title words the owner
 MODEL = "qwen2.5:7b"  # small local model: enough for extraction, light on memory
 # The owner's choice (2026-10-06): for now, only these get into the agenda. Everything else is dropped in code.
 ALLOWED_KINDS = ("flight", "ticket", "airbnb")
+MANUAL = "manual"  # source of entries the owner added by hand: always kept, never re-classified
 
 EXTRACT_PROMPT = """You extract bookings from ONE email. Today is {today} ({weekday}). The email was received
 on {received}. For relative dates ("tomorrow", "next Friday"), DON'T calculate: look the day up in this calendar
@@ -181,6 +182,9 @@ def prune() -> tuple[int, int]:
     """Re-check every stored entry and drop the ones that aren't an allowed kind. Returns (kept, removed)."""
     items, keep = _load(), []
     for i in items:
+        if i.get("source") == MANUAL:
+            keep.append(i)
+            continue
         kind = classify(i)
         if kind:
             keep.append({**i, "kind": kind})
@@ -209,6 +213,24 @@ def upsert(activities: list[dict], source: str = "") -> int:
     return added
 
 
+def add(title: str, day: date, time: str = "", end_time: str = "", location: str = "") -> dict:
+    """An event the owner asked for by hand (kind "event"): stored as given, reminded like the rest."""
+    title = title.strip()[:60]
+    for t in (time, end_time):
+        if t and not re.fullmatch(r"\d{2}:\d{2}", t):
+            raise ValueError("times must be HH:MM")
+    if not title:
+        raise ValueError("title is required")
+    items = _load()
+    key = hashlib.sha1(f"{title.lower()}|{day.isoformat()}|{time}".encode()).hexdigest()[:12]
+    item = {"title": title, "date": day.isoformat(), "time": time, "end_time": end_time, "end_date": "",
+            "location": location.strip()[:80], "kind": "event", "status": "confirmed", "id": key,
+            "source": MANUAL, "updated": datetime.now().isoformat(timespec="seconds")}
+    items = [i for i in items if i["id"] != key] + [item]
+    _save(sorted(items, key=lambda i: (i["date"], i["time"] or "99:99")))
+    return item
+
+
 def between(start: date, end: date, include_cancelled: bool = False) -> list[dict]:
     return [i for i in _load() if start.isoformat() <= i["date"] <= end.isoformat()
             and (include_cancelled or i["status"] != "cancelled")]
@@ -216,7 +238,8 @@ def between(start: date, end: date, include_cancelled: bool = False) -> list[dic
 
 def fmt(i: dict, with_day: bool = True) -> str:
     d = date.fromisoformat(i["date"])
-    when = (d.strftime("%a %b %d") if with_day else "") + (f" {i['time']}" if i["time"] else "")
+    span = i["time"] + (f"–{i['end_time']}" if i.get("end_time") else "")
+    when = (d.strftime("%a %b %d") if with_day else "") + (f" {span}" if i["time"] else "")
     extra = f" · {i['location']}" if i["location"] else ""
     flag = " (rescheduled)" if i["status"] == "rescheduled" else " (tentative)" if i["status"] == "tentative" else ""
     return f"• {when.strip()}: {i['title']}{extra}{flag}"

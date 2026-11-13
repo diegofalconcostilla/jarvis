@@ -177,7 +177,18 @@ def jobs_location(p: dict) -> str:
     return "sent"
 
 
+def agenda_add(p: dict) -> str:
+    """Add an event to Jarvis's local agenda (no Google access): reminded on Telegram like everything else."""
+    from . import agenda
+    from .reminders import send
+    item = agenda.add(p["title"], date.fromisoformat(p["date"]), p.get("time", ""), p.get("end_time", ""),
+                      p.get("location", ""))
+    send("🗓 Added to your agenda\n" + agenda.fmt(item))
+    return "sent"
+
+
 ACTIONS = {"agenda": (agenda_check, {"start": str, "end": str}),
+           "agenda_add": (agenda_add, {"title": str, "date": str, "time": str, "end_time": str, "location": str}),
            "jobs_location": (jobs_location, {"place": str}),
            "jobs_upload_folder": (jobs_upload_folder, {}),
            "jobs_positions": (jobs_positions, {}),

@@ -73,3 +73,22 @@ class Relay(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgendaAdd(unittest.TestCase):
+    def test_add_stores_locally_reminds_and_survives_prune(self):
+        from datetime import date
+        from jarvis import agenda
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(agenda, "STORE", Path(d) / "agenda.json"):
+            sent = []
+            with mock.patch("jarvis.reminders.send", sent.append):
+                p = relay.validate("agenda_add", {"title": "Dinner", "date": "2026-11-24", "time": "17:00",
+                                                  "end_time": "19:00"})
+                self.assertEqual(relay.ACTIONS["agenda_add"][0](p), "sent")
+            self.assertIn("17:00–19:00: Dinner", sent[0])
+            self.assertEqual(oct(os.stat(agenda.STORE).st_mode & 0o777), "0o600")
+            with mock.patch.object(agenda, "classify", return_value=""):  # the model would drop it; manual stays
+                self.assertEqual(agenda.prune(), (1, 0))
+            self.assertEqual([i["title"] for i in agenda.between(date(2026, 11, 24), date(2026, 11, 24))], ["Dinner"])
+            with self.assertRaises(ValueError):
+                agenda.add("Bad", date(2026, 11, 24), "5pm")
